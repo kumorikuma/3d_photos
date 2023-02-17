@@ -48,3 +48,6 @@
 /Animation[[:space:]]Test/Assets/Toon[[:space:]]Fantasy[[:space:]]Nature/Scenes/Demo_Scene_Puddle.unity filter=lfs diff=lfs merge=lfs -text
 /Animation[[:space:]]Test/Assets/Toon[[:space:]]Fantasy[[:space:]]Nature/Terrain/New[[:space:]]Terrain.asset filter=lfs diff=lfs merge=lfs -text
 Assets/main.unity filter=lfs diff=lfs merge=lfs -text
+Assets/SampleScene.unity filter=lfs diff=lfs merge=lfs -text
+Assets/shiba_foreground.unity filter=lfs diff=lfs merge=lfs -text
+Assets/shiba_foreground.PNG filter=lfs diff=lfs merge=lfs -text
