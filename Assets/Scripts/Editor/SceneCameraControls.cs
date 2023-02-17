@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Collections;
 using System.Collections.Generic;
 using Unity.EditorCoroutines.Editor;
@@ -8,11 +9,13 @@ using UnityEditor;
 public class SceneCameraControls : EditorWindow {
     public float AnimationLength = 2;
     public int FPS = 60;
+    public bool SaveFrames = false;
+    public float StartAngle = 0;
     public float EndAngle = 180;
     public bool Boomerang = true;
     public bool OrbitClockwise = true;
     public bool ResetOnEnd = true;
-    public float ZoomAmount = 2.0f;
+    public float ZoomAmount = 0.5f;
     public float ResetCameraDistance = 2.5f;
     public Camera camera = null;
     public GameObject pivot = null;
@@ -23,12 +26,18 @@ public class SceneCameraControls : EditorWindow {
     double previousTime = 0;
     int playbackDirection = 1;
     Quaternion originalRotation;
+    Quaternion originalPivotRotation;
     float originalSize;
     Vector3 originalPivot;
     Vector3 originalCameraPosition;
     float originalCameraDistance;
     float fov;
     Quaternion lookRotation;
+
+    // Screen Recording
+    Rect captureRect;
+    RenderTexture renderTexture;
+    Texture2D screenShot;
 
     [MenuItem("Custom/Scene Camera Controls")]
     public static void OpenWindow() {
@@ -42,10 +51,89 @@ public class SceneCameraControls : EditorWindow {
             originalCameraPosition = camera.transform.position;
             originalCameraDistance = (pivot.transform.position - originalCameraPosition).magnitude;
             originalRotation = camera.transform.rotation;
+            originalPivotRotation = pivot.transform.rotation;
+            originalPivot = pivot.transform.position;
             fov = camera.fieldOfView / 360.0f * 2 * Mathf.PI;
         }
     }
  
+
+    // configure with raw, jpg, png, or ppm (simple raw format)
+    public enum Format { RAW, JPG, PNG, PPM };
+    public Format format = Format.JPG;
+    // create a unique filename using a one-up variable
+    private string uniqueFilename()
+    {
+         // if folder not specified by now use a good default
+        string folder = Application.dataPath;
+        if (Application.isEditor)
+        {
+            // put screenshots in folder above asset path so unity doesn't index the files
+            var stringPath = folder + "/..";
+            folder = Path.GetFullPath(stringPath);
+        }
+        folder += "/Screenshots";
+
+        // make sure directoroy exists
+        System.IO.Directory.CreateDirectory(folder);
+
+        // count number of files of specified format in folder
+        // string mask = string.Format("screenshot*.{0}", format.ToString().ToLower());
+        // counter = Directory.GetFiles(folder, mask, SearchOption.TopDirectoryOnly).Length;
+ 
+        // use width, height, and counter for unique file name
+        var filename = string.Format("{0}/screenshot_{1}.{2}", folder, framesRendered, format.ToString().ToLower());
+
+        // up counter for next call
+        // ++counter;
+
+        // return unique filename
+        return filename;
+    }
+
+    // You can compile these images into a video using ffmpeg:
+    // ffmpeg -i screenshot_%d.jpg -y recording.mp4
+    void SaveFrame() {
+        // get main camera and manually render scene into rt
+        camera.targetTexture = renderTexture;
+        camera.Render();
+
+        // read pixels will read from the currently active render texture so make our offscreen 
+        // render texture active and then read the pixels
+        RenderTexture.active = renderTexture;
+        screenShot.ReadPixels(captureRect, 0, 0);
+
+        // reset active camera texture and render texture
+        camera.targetTexture = null;
+        RenderTexture.active = null;
+
+        // get our unique filename
+        string filename = uniqueFilename();
+
+        // pull in our file header/data bytes for the specified image format (has to be done from main thread)
+        byte[] fileHeader = null;
+        byte[] fileData = null;
+        if (format == Format.RAW) {
+            fileData = screenShot.GetRawTextureData();
+        } else if (format == Format.PNG) {
+            fileData = screenShot.EncodeToPNG();
+        } else if (format == Format.JPG) {
+            fileData = screenShot.EncodeToJPG();
+        } else { // PPM
+            // create a file header for ppm formatted file
+            string headerStr = string.Format("P6\n{0} {1}\n255\n", captureRect.width, captureRect.height);
+            fileHeader = System.Text.Encoding.ASCII.GetBytes(headerStr);
+            fileData = screenShot.GetRawTextureData();
+        }
+
+        // create file and write optional header with image bytes
+        var f = System.IO.File.Create(filename);
+        if (fileHeader != null) f.Write(fileHeader, 0, fileHeader.Length);
+        f.Write(fileData, 0, fileData.Length);
+        f.Close();
+        Debug.Log(string.Format("Wrote screenshot {0} of size {1}", filename, fileData.Length));
+    }
+
     void OnGUI() {
         //Draw things here. Same as custom inspectors, EditorGUILayout and GUILayout has most of the things you need
         AnimationLength = EditorGUILayout.FloatField("Animation Length (s)", AnimationLength);
@@ -54,9 +142,12 @@ public class SceneCameraControls : EditorWindow {
         }
 
         FPS = EditorGUILayout.IntSlider("FPS", FPS, 1, 240);
+        SaveFrames = EditorGUILayout.Toggle("Save Frames", SaveFrames);
         Boomerang = EditorGUILayout.Toggle("Boomerang", Boomerang);
         ResetOnEnd = EditorGUILayout.Toggle("Reset On End", ResetOnEnd);
-        EndAngle = EditorGUILayout.Slider("End Angle", EndAngle, 0, 360);
+        ZoomAmount = EditorGUILayout.Slider("Zoom Amount", ZoomAmount, 0, 1.0f);
+        StartAngle = EditorGUILayout.Slider("Start Angle", StartAngle, -360, 360);
+        EndAngle = EditorGUILayout.Slider("End Angle", EndAngle, -360, 360);
         OrbitClockwise = EditorGUILayout.Toggle("Orbit Clockwise", OrbitClockwise);
         camera = EditorGUILayout.ObjectField("Camera Object", camera, typeof(Camera), true) as Camera;
         pivot = EditorGUILayout.ObjectField("Pivot", pivot, typeof(GameObject), true) as GameObject;
@@ -118,6 +209,8 @@ public class SceneCameraControls : EditorWindow {
             if (camera) {
                 camera.transform.rotation = originalRotation;
                 camera.transform.position = originalCameraPosition;
+                pivot.transform.rotation = originalPivotRotation;
+                pivot.transform.position = originalPivot;
             } else {
                 fov = SceneView.lastActiveSceneView.camera.fieldOfView / 360.0f * 2 * Mathf.PI;
                 SceneView.lastActiveSceneView.rotation = Quaternion.LookRotation(Vector3.left, Vector3.up);
@@ -138,11 +231,13 @@ public class SceneCameraControls : EditorWindow {
         if (!OrbitClockwise) {
             angle = 360 - angle;
         }
-        angle = angle / 180.0f * Mathf.PI;
+        // angle = angle / 180.0f * Mathf.PI;
 
         if (camera) {
-            camera.transform.position = originalCameraPosition + 0.1f * new Vector3((float)Math.Cos(angle) - 1, (float)Math.Sin(angle), 0);
+            angle = angle / 180.0f * Mathf.PI;
+            camera.transform.position = originalCameraPosition + 0.2f * new Vector3((float)Math.Cos(angle) - 1, (float)Math.Sin(angle), 0);
             camera.transform.rotation = Quaternion.LookRotation(pivot.transform.position - camera.transform.position);
+            // pivot.transform.rotation = Quaternion.AngleAxis(angle, Vector3.up) * originalRotation;
         } else {
             SceneView.lastActiveSceneView.pivot = Vector3.zero;
             SceneView.lastActiveSceneView.rotation = Quaternion.AngleAxis(angle, Vector3.up) * originalRotation;
@@ -154,7 +249,7 @@ public class SceneCameraControls : EditorWindow {
         float cameraDistance = EasingFunction.EaseInOutSine(originalCameraDistance, originalCameraDistance - ZoomAmount, t);
 
         if (camera) {
-            camera.transform.position = cameraDistance * (pivot.transform.position - originalCameraPosition);
+            camera.transform.position = pivot.transform.position + (originalCameraPosition - pivot.transform.position).normalized * cameraDistance;
         } else {
             SceneView.lastActiveSceneView.pivot = Vector3.zero;
             SceneView.lastActiveSceneView.rotation = originalRotation;
@@ -181,6 +276,8 @@ public class SceneCameraControls : EditorWindow {
         // Init
         if (camera) {
             originalRotation = camera.transform.rotation;
+            originalPivot = pivot.transform.position;
+            originalPivotRotation = pivot.transform.rotation;
             originalCameraPosition = camera.transform.position;
             originalCameraDistance = (pivot.transform.position - originalCameraPosition).magnitude;
             fov = camera.fieldOfView / 360.0f * 2 * Mathf.PI;
@@ -204,6 +301,14 @@ public class SceneCameraControls : EditorWindow {
             stepSize *= 2;
         }
 
+        // Prep screen recording
+        // creates off-screen render texture that can rendered into
+        captureRect = camera.pixelRect;
+        int captureWidth = (int)captureRect.width;
+        int captureHeight = (int)captureRect.height;
+        renderTexture = new RenderTexture(captureWidth, captureHeight, 24);
+        screenShot = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false);
+
         while (framesRendered < numFrames) {
             double deltaTime = EditorApplication.timeSinceStartup - previousTime;
             previousTime = EditorApplication.timeSinceStartup;
@@ -217,6 +322,11 @@ public class SceneCameraControls : EditorWindow {
             }
 
             update(t);
+
+            // Save screenshot if needed
+            if (SaveFrames) {
+                SaveFrame();
+            }
 
             // Advance time
             t += stepSize * playbackDirection;
