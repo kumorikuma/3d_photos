@@ -158,74 +158,6 @@ public class MeshGeneration : EditorWindow {
         return new Color(r, g, b, a);
     }
 
-    struct Voxel {
-        public Neighbors neighbors;
-        public bool isBackground;
-    }
-
-    struct Neighbors {
-        public int? up;
-        public int? down;
-        public int? left;
-        public int? right; 
-    }
-
-    Color[] FilterImage(Color32[] image, int width, int height) {
-        int filterRadius = 4;
-        int filterWidth = filterRadius * 2 + 1;
-        Color[] filteredColors = new Color[image.Length];
-        for (int row = 0; row < height; row++) {
-            for (int col = 0; col < width; col++) {
-                int vertIdx = row * width + col;
-                List<float> rValues = new List<float>(filterWidth * filterWidth);
-                List<float> gValues = new List<float>(filterWidth * filterWidth);
-                List<float> bValues = new List<float>(filterWidth * filterWidth);
-                List<float> aValues = new List<float>(filterWidth * filterWidth);
-                for (int j = -filterRadius; j < filterRadius; j++) {
-                    for (int i = -filterRadius; i < filterRadius; i++) {
-                        int sampleRow = row + j;
-                        if (sampleRow < 0) { 
-                            sampleRow = 0; 
-                            continue;
-                        }
-                        else if (sampleRow >= height) { 
-                            sampleRow = height - 1; 
-                            continue;
-                        }
-                        int sampleCol = col + i;
-                        if (sampleCol < 0) { 
-                            sampleCol = 0; 
-                            continue;
-                        }
-                        else if (sampleCol >= width) { 
-                            sampleCol = width - 1; 
-                            continue;
-                        }
-                        int sampleVertIdx = sampleRow * width + sampleCol;
-                        Color32 sampledColor = image[sampleVertIdx];
-                        rValues.Add(sampledColor.r / 255.0f);
-                        gValues.Add(sampledColor.g / 255.0f);
-                        bValues.Add(sampledColor.b / 255.0f);
-                        aValues.Add(sampledColor.a / 255.0f);
-                    }
-                }
-                // Median
-                rValues.Sort();
-                gValues.Sort();
-                bValues.Sort();
-                aValues.Sort();
-                // Color newColor = new Color();
-                // newColor.r = rValues[rValues.Count / 2];
-                // newColor.g = gValues[gValues.Count / 2];
-                // newColor.b = bValues[bValues.Count / 2];
-                // newColor.a = aValues[aValues.Count / 2];
-                // filteredColors[vertIdx] = newColor;
-                filteredColors[vertIdx] = new Color(rValues.Average(), gValues.Average(), bValues.Average(), aValues.Average());
-            }
-        }
-        return filteredColors;
-    }
-
     Vector3[] FilterVertices(Vector3[] vertices, bool[] isBg, int width, int height, int filterRadius = 4) {
         int filterWidth = filterRadius * 2 + 1;
         Vector3[] filteredVerts = new Vector3[vertices.Length];
@@ -239,8 +171,8 @@ public class MeshGeneration : EditorWindow {
                 Vector3 vertex = vertices[vertIdx];
                 bool isVertBg = isBg[vertIdx];
                 // Compute Centroid
-                for (int j = -filterRadius; j < filterRadius; j++) {
-                    for (int i = -filterRadius; i < filterRadius; i++) {
+                for (int j = -filterRadius; j <= filterRadius; j++) {
+                    for (int i = -filterRadius; i <= filterRadius; i++) {
                         // if (j == 0 && i == 0) { continue; } // Skip self
                         int sampleRow = row + j;
                         if (sampleRow < 0) { 
@@ -276,51 +208,67 @@ public class MeshGeneration : EditorWindow {
         return filteredVerts;
     }
 
-    Vector3[] FilterVertices2(Vector3[] vertices, bool[] isBg, int width, int height) {
-        int filterRadius = 4;
+    bool IsBorderVertex(int row, int col, int width, int height, bool[] isBg) {
+        int vertIdx = row * width + col;
+        // Check current Row
+        if (col > 0 && isBg[vertIdx - 1]) { return true; } // Check previous column
+        if (col < width - 1 && isBg[vertIdx + 1]) { return true; } // Check next column
+        // Check previous row
+        if (row > 0) {
+            int baseIdx = vertIdx - width;
+            if (isBg[baseIdx]) { return true; }
+            if (col > 0 && isBg[baseIdx - 1]) { return true; } // Check previous column
+            if (col < width - 1 && isBg[baseIdx + 1]) { return true; } // Check next column
+        }
+        // Check next row
+        if (row < height - 1) {
+            int baseIdx = vertIdx + width;
+            if (isBg[baseIdx]) { return true; }
+            if (col > 0 && isBg[baseIdx - 1]) { return true; } // Check previous column
+            if (col < width - 1 && isBg[baseIdx + 1]) { return true; } // Check next column
+        }
+        return false;
+    }
+
+    Vector3[] FilterFgBorderVertices(Vector3[] vertices, bool[] isBg, int width, int height) {
+        int filterRadius = 1;
         int filterWidth = filterRadius * 2 + 1;
         Vector3[] filteredVerts = new Vector3[vertices.Length];
         for (int row = 0; row < height; row++) {
             for (int col = 0; col < width; col++) {
                 int vertIdx = row * width + col;
+                if (isBg[vertIdx]) { 
+                    filteredVerts[vertIdx] = vertices[vertIdx];
+                    continue; 
+                }
                 List<float> xValues = new List<float>(filterWidth * filterWidth);
                 List<float> yValues = new List<float>(filterWidth * filterWidth);
                 List<float> zValues = new List<float>(filterWidth * filterWidth);
-                bool isVertBg = isBg[vertIdx];
-                // Compute Centroid
-                for (int j = -filterRadius; j < filterRadius; j++) {
-                    for (int i = -filterRadius; i < filterRadius; i++) {
-                        // if (j == 0 && i == 0) { continue; } // Skip self
+                Vector3 vert = vertices[vertIdx];
+                // If this is a border vertex...
+                if (!IsBorderVertex(row, col, width, height, isBg)) {
+                    filteredVerts[vertIdx] = vertices[vertIdx];
+                    continue;
+                }
+                // Average between the neighbor border vertices
+                for (int j = -filterRadius; j <= filterRadius; j++) {
+                    for (int i = -filterRadius; i <= filterRadius; i++) {
                         int sampleRow = row + j;
-                        if (sampleRow < 0) { 
-                            sampleRow = 0; 
-                            continue;
-                        }
-                        else if (sampleRow >= height) { 
-                            sampleRow = height - 1; 
-                            continue;
-                        }
+                        if (sampleRow < 0) { continue; }
+                        else if (sampleRow >= height) { continue; }
                         int sampleCol = col + i;
-                        if (sampleCol < 0) { 
-                            sampleCol = 0; 
-                            continue;
-                        }
-                        else if (sampleCol >= width) { 
-                            sampleCol = width - 1; 
-                            continue;
-                        }
+                        if (sampleCol < 0) { continue; }
+                        else if (sampleCol >= width) { continue; }
                         int sampleVertIdx = sampleRow * width + sampleCol;
-                        bool isSampledVertBg = isBg[sampleVertIdx];
-                        if (isVertBg != isSampledVertBg) { 
-                            sampleVertIdx = vertIdx;
-                            continue;
-                        }
-                        Vector3 sampledVert = vertices[sampleVertIdx];
-                        xValues.Add(sampledVert.x);
-                        yValues.Add(sampledVert.y);
-                        zValues.Add(sampledVert.z);
+                        if (isBg[sampleVertIdx]) { continue; }
+                        if (!IsBorderVertex(sampleRow, sampleCol, width, height, isBg)) { continue; }
+                        Vector3 sampledVertex = vertices[sampleVertIdx];
+                        xValues.Add(sampledVertex.x);
+                        yValues.Add(sampledVertex.y);
+                        zValues.Add(sampledVertex.z);
                     }
                 }
+
                 Vector3 centroid = new Vector3(xValues.Average(), yValues.Average(), zValues.Average());
                 filteredVerts[vertIdx] = centroid;
             }
@@ -436,10 +384,10 @@ public class MeshGeneration : EditorWindow {
                         isBackgroundTriangle = isBg[vertC] && isBg[vertD] && isBg[vertA];
                         isForegroundTriangle = !isBg[vertC] && !isBg[vertD] && !isBg[vertA];
                         if (isBackgroundTriangle || isForegroundTriangle) {
-                            // triangles.Add(vertC);
-                            // triangles.Add(vertD);
-                            // triangles.Add(vertA);
-                            // numTrianglesGenerated += 1;
+                            triangles.Add(vertC);
+                            triangles.Add(vertD);
+                            triangles.Add(vertA);
+                            numTrianglesGenerated += 1;
                         }
                     }
                 }
@@ -462,10 +410,10 @@ public class MeshGeneration : EditorWindow {
                         isBackgroundTriangle = isBg[vertD] && isBg[vertB] && isBg[vertA];
                         isForegroundTriangle = !isBg[vertD] && !isBg[vertB] && !isBg[vertA];
                         if (isBackgroundTriangle || isForegroundTriangle) {
-                            // triangles.Add(vertD);
-                            // triangles.Add(vertB);
-                            // triangles.Add(vertA);
-                            // numTrianglesGenerated += 1;
+                            triangles.Add(vertD);
+                            triangles.Add(vertB);
+                            triangles.Add(vertA);
+                            numTrianglesGenerated += 1;
                         }
                     }
                 }
@@ -479,11 +427,12 @@ public class MeshGeneration : EditorWindow {
         // Run a median filter on the positions to smooth it out.
         // Border behavior: clamp
         if (RunMedianFilter) {
+            // This is by far the slowest part of the algorithm
             vertices = FilterVertices(vertices, isBg, width, height);
             vertices = FilterVertices(vertices, isBg, width, height);
             vertices = FilterVertices(vertices, isBg, width, height);
-            vertices = FilterVertices(vertices, isBg, width, height);
-            vertices = FilterVertices(vertices, isBg, width, height);
+            vertices = FilterFgBorderVertices(vertices, isBg, width, height);
+            vertices = FilterFgBorderVertices(vertices, isBg, width, height);
         }
 
         // Background Mesh Object
@@ -506,7 +455,6 @@ public class MeshGeneration : EditorWindow {
         int?[] newVertIdxs = new int?[width * height];
         for (int row = 0; row < height; row++) {
             for (int col = 0; col < width; col++) {
-                Vector2 uv = new Vector2(col / (float)(width), row / (float)(height)); // Range [0, 1]
                 int vertIdx = row * width + col;
 
                 // Fill in the color
@@ -1024,5 +972,7 @@ public class MeshGeneration : EditorWindow {
     // - What should be shown "behind" the foreground object? Blur the background, hallucinate the background, provide user with method to supply background info
     //   - What about the case where there should be multiple "layers"? Like boz' baby arm.
     // - Mesh density
-    //   - Basically generating a LOD. Plenty of algorithms out there, but one obvious optimization is that only areas with lots of detail require high triangle density.
+    //   - Basically generating a LOD. Plenty of algorithms out there, but one obvious optimization is that only areas with lots of detail require high triangle density
+    // - Jagged borders. Fix by blurring edge only
+    // TODO: Can also outpaint using DallE. Make background image a square.
 }
