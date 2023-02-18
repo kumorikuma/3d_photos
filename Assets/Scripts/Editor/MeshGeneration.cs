@@ -1,12 +1,12 @@
 using System;
-using System.Linq;
-using System.IO;
 using System.Collections;
 using System.Collections.Generic;
-using Unity.EditorCoroutines.Editor;
+using System.IO;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEditor;
+using Unity.EditorCoroutines.Editor;
 
 public class MeshGeneration : EditorWindow {
     Texture2D ColorImage;
@@ -67,6 +67,8 @@ public class MeshGeneration : EditorWindow {
         deltaThreshold = EditorGUILayout.Slider("Delta Threshold", deltaThreshold, 0, 1);
         InputMesh = EditorGUILayout.ObjectField("Mesh to Process", InputMesh, typeof(MeshFilter), true) as MeshFilter;
         RunMedianFilter = EditorGUILayout.Toggle("Enable Median Filter", RunMedianFilter);
+        // For making tooltips
+        // new GUIContent("Test Float", "Here is a tooltip")
 
         if(GUILayout.Button("Generate V1")) {
             this.StartCoroutine(Generate3DPhotoV1(ColorImage, DepthImage));
@@ -83,6 +85,11 @@ public class MeshGeneration : EditorWindow {
         if(GUILayout.Button("Generate V4")) {
             this.StartCoroutine(Generate3DPhotoV4(ColorImage, DepthImage, ForegroundImage));
         }
+    }
+
+    public static int ToNextNearestPowerOf2(int x) {
+        if (x < 2) { return 1; }
+        return (int) Mathf.Pow(2, (int) Mathf.Log(x-1, 2) + 1);
     }
 
     // See: https://support.unity.com/hc/en-us/articles/206486626-How-can-I-get-pixels-from-unreadable-textures-
@@ -158,15 +165,12 @@ public class MeshGeneration : EditorWindow {
         return new Color(r, g, b, a);
     }
 
-    Vector3[] FilterVertices(Vector3[] vertices, bool[] isBg, int width, int height, int filterRadius = 4) {
+    Vector3[] FilterVertices(Vector3[] vertices, bool[] isBg, int width, int height, int filterRadius = 4, bool useMedianInsteadOfAverage = false) {
         int filterWidth = filterRadius * 2 + 1;
         Vector3[] filteredVerts = new Vector3[vertices.Length];
         for (int row = 0; row < height; row++) {
             for (int col = 0; col < width; col++) {
                 int vertIdx = row * width + col;
-                List<float> xValues = new List<float>(filterWidth * filterWidth);
-                List<float> yValues = new List<float>(filterWidth * filterWidth);
-                List<float> zValues = new List<float>(filterWidth * filterWidth);
                 List<float> distances = new List<float>(filterWidth * filterWidth);
                 Vector3 vertex = vertices[vertIdx];
                 bool isVertBg = isBg[vertIdx];
@@ -202,7 +206,12 @@ public class MeshGeneration : EditorWindow {
                         distances.Add((sampledVert - Vector3.zero).magnitude);
                     }
                 }
-                filteredVerts[vertIdx] = Vector3.zero + vertex.normalized * distances.Average();
+                if (useMedianInsteadOfAverage) {
+                    distances.Sort();
+                    filteredVerts[vertIdx] = Vector3.zero + vertex.normalized * distances[distances.Count / 2];
+                } else {
+                    filteredVerts[vertIdx] = Vector3.zero + vertex.normalized * distances.Average();
+                }
             }
         }
         return filteredVerts;
@@ -276,19 +285,10 @@ public class MeshGeneration : EditorWindow {
         return filteredVerts;
     }
 
-    void _duplicateVert(int vertIdx, int?[] newVertIdx, List<Vector3> newVerts, List<Vector2> newUvs, Vector3[] verts, Vector2[] uvs, bool[] isBg, Color[] colors, float distance) {
-        newVertIdx[vertIdx] = newVerts.Count;
-        if (isBg[vertIdx]) {
-            newVerts.Add(verts[vertIdx]);
-        } else {
-            Vector3 shiftedVert = Vector3.zero + verts[vertIdx].normalized * distance;
-            newVerts.Add(shiftedVert);
-            colors[vertIdx] = new Color(0, 0, 0, 0);
-        }
-        newUvs.Add(uvs[vertIdx]);
-    }
-
     IEnumerator Generate3DPhotoV4(Texture2D _colorImage, Texture2D _depthImage, Texture2D _foregroundImage) {
+        bool projectFromOrigin = true;
+        bool convertDepthValuesFromDisparity = true;
+
         Texture2D depthImage = GetReadableTexture(_depthImage);
         Texture2D fgImage = GetReadableTexture(_foregroundImage, false);
         Texture2D colorImage = GetReadableTexture(_colorImage, false);
@@ -319,31 +319,30 @@ public class MeshGeneration : EditorWindow {
                 int vertIdx = row * width + col;
                 Vector2 uv = new Vector2(col / (float)(width), row / (float)(height)); // Range [0, 1]
 
-                float depth = 1.0f - SampleTexture(uv, depthPixels, depthImage.width, depthImage.height).r; // 1 minus depth to flip it since we want white = closer
+                float disparityDepth = SampleTexture(uv, depthPixels, depthImage.width, depthImage.height).r;
                 Vector2 angles = new Vector2(degToRad((uv.x - 0.5f) * cameraHorizontalFov), degToRad((uv.y - 0.5f) * cameraVerticalFov)); 
-                Vector3 viewingAngle = new Vector3((float)Math.Sin(angles.x), (float)Math.Sin(angles.y), (float)Math.Cos(angles.x));
+                Vector3 viewingDirection = (new Vector3((float)Math.Sin(angles.x), (float)Math.Sin(angles.y), (float)Math.Cos(angles.x))).normalized;
 
-                // Simply just using depth as Z value
-                // float depth = SampleTexture(uv, depthPixels, depthImage.width, depthImage.height).r;
-
-                // Apply a conversion from disparity depth to actual z value
-                // Change in foreground has little effect. Change in background has a lot of effect.
-                // As a result, need to apply distance thresholding.
-                float maxDepth = 10;
-                float z = 1 / (depth + (1 / maxDepth)); // Range [0.5, maxDepth]
-                z = (z - 0.5f) / (maxDepth - 0.5f); // Range [0.0, 1.0]
-
-                // Trying different curves
-                // z = (1 - Mathf.Log(depth * 100 + 1) + Mathf.Log(101)) / (Mathf.Log(101) + 1);
-                // z = (1 - Mathf.Pow(10, depth) + 10) / 10;
+                float depth = disparityDepth;
+                if (convertDepthValuesFromDisparity) {
+                    // Apply a conversion from disparity depth to actual z value
+                    // Change in foreground has little effect. Change in background has a lot of effect.
+                    // As a result, need to apply distance thresholding.
+                    float maxDepth = 1;
+                    depth = 1 / (disparityDepth + (1 / maxDepth)); // Range [0.5, maxDepth]
+                    depth = (depth - 0.5f) / (maxDepth - 0.5f); // Range [0.0, 1.0]
+                }
 
                 bool isBackground = SampleTexture(uv, fgPixels, fgImage.width, fgImage.height).a < 0.01f;
 
-                // Without using projection
-                // Vector3 vertex = new Vector3(uv.x * 2 - 1, uv.y * 2 - 1, z); 
-
-                // Project from virtual camera position out 
-                Vector3 vertex = viewingAngle * (depth + 1);
+                Vector3 vertex;
+                if (projectFromOrigin) {
+                    // Project from virtual camera position out 
+                    vertex = viewingDirection * (depth + 1);
+                } else {
+                    // Without using projection
+                    vertex = new Vector3(uv.x * 2 - 1, uv.y * 2 - 1, depth); 
+                }
 
                 vertices[vertIdx] = vertex;
                 uvs[vertIdx] = uv;
@@ -428,9 +427,10 @@ public class MeshGeneration : EditorWindow {
         // Border behavior: clamp
         if (RunMedianFilter) {
             // This is by far the slowest part of the algorithm
+            vertices = FilterVertices(vertices, isBg, width, height, 4, true);
             vertices = FilterVertices(vertices, isBg, width, height);
-            vertices = FilterVertices(vertices, isBg, width, height);
-            vertices = FilterVertices(vertices, isBg, width, height);
+            // vertices = FilterVertices(vertices, isBg, width, height);
+            // vertices = FilterVertices(vertices, isBg, width, height);
             vertices = FilterFgBorderVertices(vertices, isBg, width, height);
             vertices = FilterFgBorderVertices(vertices, isBg, width, height);
         }
@@ -443,137 +443,223 @@ public class MeshGeneration : EditorWindow {
         Mesh perimeterMesh = new Mesh();
         perimeterMesh.indexFormat = IndexFormat.UInt32;
 
-        List<Vector3> perimeterVertices = new List<Vector3>();
-        List<Vector2> perimeterUvs = new List<Vector2>();
-        List<int> perimeterTriangles = new List<int>();
+        List<Vector3> bgVertices = new List<Vector3>();
+        List<Vector2> bgUvs = new List<Vector2>();
+        List<int> bgTriangles = new List<int>();
 
         // Generate a background mesh
         // Make a new texture that uses alpha = 0 for the empty spots. Goal is to infill those spots using DallE.
-        Texture2D bgTexture = new Texture2D(width, height);
-        Color[] colors = new Color[width * height];
+        // We'll also do outpainting. The output texture will be square.
+        int bgTextureSize = Mathf.Max(ToNextNearestPowerOf2(width), ToNextNearestPowerOf2(height));
+        Texture2D bgTexture = new Texture2D(bgTextureSize, bgTextureSize);
+        Color[] colors = new Color[bgTextureSize * bgTextureSize];
         Color32[] colorImagePixels = colorImage.GetPixels32(0);
-        int?[] newVertIdxs = new int?[width * height];
-        for (int row = 0; row < height; row++) {
-            for (int col = 0; col < width; col++) {
-                int vertIdx = row * width + col;
+        int?[] newVertIdxs = new int?[bgTextureSize * bgTextureSize];
+        // Center the original inside of the larger square
+        int originalStartRow = (int)((bgTextureSize - height) / 2.0f);
+        int originalEndRow = originalStartRow + height;
+        int originalStartColumn = (int)((bgTextureSize - width) / 2.0f);
+        int originalEndColumn = originalStartColumn + width;
+        Debug.Log("bgTextureSize: " + bgTextureSize);
+        Debug.Log("width: " + width);
+        Debug.Log("height: " + height);
+        Debug.Log("originalStartRow: " + originalStartRow);
+        Debug.Log("originalEndRow: " + originalEndRow);
+        Debug.Log("originalStartColumn: " + originalStartColumn);
+        Debug.Log("originalEndColumn: " + originalEndColumn);
+        for (int row = 0; row < bgTextureSize; row++) {
+            for (int col = 0; col < bgTextureSize; col++) {
+                int newVertIdx = row * bgTextureSize + col;
+                Vector2 uv = new Vector2(col / (float)(bgTextureSize), row / (float)(bgTextureSize)); // Range [0, 1]
 
-                // Fill in the color
-                colors[vertIdx] = SampleTexture(uvs[vertIdx], colorImagePixels, colorImage.width, colorImage.height);
+                // If this is part of the original...
+                // We'll inset it by 1 row/col in order to give the outpainted frame something to connect to.
+                if (row >= originalStartRow + 1 && row < originalEndRow - 1 && col >= originalStartColumn + 1 && col < originalEndColumn - 1) {
+                    int originalRow = row - originalStartRow;
+                    int originalCol = col - originalStartColumn;
+                    int originalVertIdx = originalRow * width + originalCol;
 
-                // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to duplicate it.
-                bool hasFgVert = false;
+                    // Fill in the color
+                    colors[newVertIdx] = SampleTexture(uvs[originalVertIdx], colorImagePixels, colorImage.width, colorImage.height);
 
-                // Check current Row
-                if (!isBg[vertIdx]) { hasFgVert = true; }
-                if (col > 0 && !isBg[vertIdx - 1]) { hasFgVert = true; } // Check previous column
-                if (col < width - 1 && !isBg[vertIdx + 1]) { hasFgVert = true; } // Check next column
-                // Check previous row
-                if (row > 0) {
-                    int baseIdx = vertIdx - width;
-                    if (!isBg[baseIdx]) { hasFgVert = true; }
-                    if (col > 0 && !isBg[baseIdx - 1]) { hasFgVert = true; } // Check previous column
-                    if (col < width - 1 && !isBg[baseIdx + 1]) { hasFgVert = true; } // Check next column
-                }
-                // Check next row
-                if (row < height - 1) {
-                    int baseIdx = vertIdx + width;
-                    if (!isBg[baseIdx]) { hasFgVert = true; }
-                    if (col > 0 && !isBg[baseIdx - 1]) { hasFgVert = true; } // Check previous column
-                    if (col < width - 1 && !isBg[baseIdx + 1]) { hasFgVert = true; } // Check next column
-                }
-                
-                // If there's no FG verts, just skip
-                if (!hasFgVert) {
-                    continue;
-                }
+                    // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to duplicate it.
+                    bool hasFgVert = false;
 
-                // If it's a FG vert, we will also shift it such that it's in the background.
-                // Take the depth of the left BG pixel and right BG pixel.
-                float lastBgDistance = 1;
-                int distanceToLast = 0;
-                for (int x = col - 1; x > 0; x--) {
-                    int searchVertIdx = row * width + x;
-                    distanceToLast++;
-                    if (isBg[searchVertIdx]) {
-                        lastBgDistance = (vertices[searchVertIdx] - Vector3.zero).magnitude;
-                        break;
+                    // Check current Row
+                    if (!isBg[originalVertIdx]) { hasFgVert = true; }
+                    if (originalCol > 0 && !isBg[originalVertIdx - 1]) { hasFgVert = true; } // Check previous column
+                    if (originalCol < width - 1 && !isBg[originalVertIdx + 1]) { hasFgVert = true; } // Check next column
+                    // Check previous row
+                    if (originalRow > 0) {
+                        int baseIdx = originalVertIdx - width;
+                        if (!isBg[baseIdx]) { hasFgVert = true; }
+                        if (originalCol > 0 && !isBg[baseIdx - 1]) { hasFgVert = true; } // Check previous column
+                        if (originalCol < width - 1 && !isBg[baseIdx + 1]) { hasFgVert = true; } // Check next column
                     }
-                }
-                float nextBgDistance = 1;
-                int distanceToNext = 0;
-                for (int x = col + 1; x < width; x++) {
-                    int searchVertIdx = row * width + x;
-                    distanceToNext++;
-                    if (isBg[searchVertIdx]) {
-                        nextBgDistance = (vertices[searchVertIdx] - Vector3.zero).magnitude;
-                        break;
+                    // Check next row
+                    if (originalRow < height - 1) {
+                        int baseIdx = originalVertIdx + width;
+                        if (!isBg[baseIdx]) { hasFgVert = true; }
+                        if (originalCol > 0 && !isBg[baseIdx - 1]) { hasFgVert = true; } // Check previous column
+                        if (originalCol < width - 1 && !isBg[baseIdx + 1]) { hasFgVert = true; } // Check next column
                     }
-                }
-                // Get the weighted distance
-                float lastWeight = 1 / (float)distanceToLast;
-                float nextWeight = 1 / (float)distanceToNext;
-                float distance = (lastBgDistance * lastWeight  + nextBgDistance * nextWeight) / (lastWeight + nextWeight);
+                    
+                    // If there's no FG verts, just skip
+                    if (!hasFgVert) {
+                        continue;
+                    }
 
-                // If the distance is less than the FG vertex, then push it back behind it.
-                float fgDistance = (vertices[vertIdx] - Vector3.zero).magnitude;
-                if (distance < fgDistance) {
-                    distance = fgDistance + 0.001f;
-                }
+                    // If it's a FG vert, we will also shift it such that it's in the background.
+                    // Take the depth of the left BG pixel and right BG pixel.
+                    float lastBgDistance = 1;
+                    int distanceToLast = 0;
+                    for (int x = originalCol - 1; x > 0; x--) {
+                        int searchVertIdx = originalRow * width + x;
+                        distanceToLast++;
+                        if (isBg[searchVertIdx]) {
+                            lastBgDistance = (vertices[searchVertIdx] - Vector3.zero).magnitude;
+                            break;
+                        }
+                    }
+                    float nextBgDistance = 1;
+                    int distanceToNext = 0;
+                    for (int x = originalCol + 1; x < width; x++) {
+                        int searchVertIdx = originalRow * width + x;
+                        distanceToNext++;
+                        if (isBg[searchVertIdx]) {
+                            nextBgDistance = (vertices[searchVertIdx] - Vector3.zero).magnitude;
+                            break;
+                        }
+                    }
+                    // Get the weighted distance
+                    float lastWeight = 1 / (float)distanceToLast;
+                    float nextWeight = 1 / (float)distanceToNext;
+                    float distance = (lastBgDistance * lastWeight  + nextBgDistance * nextWeight) / (lastWeight + nextWeight);
 
-                _duplicateVert(vertIdx, newVertIdxs, perimeterVertices, perimeterUvs, vertices, uvs, isBg, colors, distance);            
+                    // If the distance is less than the FG vertex, then push it back behind it.
+                    float fgDistance = (vertices[originalVertIdx] - Vector3.zero).magnitude;
+                    if (distance < fgDistance) {
+                        distance = fgDistance + 0.001f;
+                    }
+
+                    // Duplicate the vertex
+                    newVertIdxs[newVertIdx] = bgVertices.Count;
+                    if (isBg[originalVertIdx]) {
+                        bgVertices.Add(vertices[originalVertIdx]);
+                    } else {
+                        Vector3 shiftedVert = Vector3.zero + vertices[originalVertIdx].normalized * distance;
+                        bgVertices.Add(shiftedVert);
+                        colors[newVertIdx] = new Color(0, 0, 0, 0);
+                    }
+                    // newUvs.Add(uvs[vertIdx]);
+                    bgUvs.Add(uv);
+                } else { // This needs to be outpainted
+                    colors[newVertIdx] = new Color(0, 0, 0, 0);
+
+                    // Use clamping behavior to use the depth from the nearest border vertex
+                    int sampleCol = col;
+                    if (sampleCol < originalStartColumn) { sampleCol = originalStartColumn; }
+                    else if (sampleCol >= originalEndColumn) { sampleCol = originalEndColumn - 1; }
+                    sampleCol = sampleCol - originalStartColumn;
+                    // sampleCol = 0;
+                    int sampleRow = row;
+                    if (sampleRow < originalStartRow) { sampleRow = originalStartRow; }
+                    else if (sampleRow >= originalEndRow) { sampleRow = originalEndRow - 1; }
+                    sampleRow = sampleRow - originalStartRow;
+                    // sampleRow = 0;
+                    float distanceFromOrigin = (vertices[sampleRow * width + sampleCol] - Vector3.zero).magnitude;
+
+                    // Expand the FOV outside of the original FOV
+                    float degreesPerPixelHFov = cameraHorizontalFov / width;
+                    float degreesPerPixelVFov = cameraVerticalFov / height;
+                    Vector2 angles;
+                    if (col < originalStartColumn) {
+                        angles.x = (originalStartColumn - col) * -degreesPerPixelHFov - cameraHorizontalFov / 2;
+                    } else {
+                        angles.x = (col - originalEndColumn) * degreesPerPixelHFov + cameraHorizontalFov / 2;
+                    }
+                    if (row < originalStartRow) {
+                        angles.y = (originalStartRow - row) * -degreesPerPixelVFov - cameraVerticalFov / 2;
+                    } else {
+                        angles.y = (row - originalEndRow) * degreesPerPixelVFov + cameraVerticalFov / 2;
+                    }
+                    Vector3 viewingDirection = (new Vector3((float)Math.Sin(degToRad(angles.x)), (float)Math.Sin(degToRad(angles.y)), (float)Math.Cos(degToRad(angles.x)))).normalized;
+
+                    newVertIdxs[newVertIdx] = bgVertices.Count;
+                    bgVertices.Add(Vector3.zero + viewingDirection * distanceFromOrigin);
+                    bgUvs.Add(uv);
+                }    
             }
         }
 
         // Form the triangles
-        for (int row = 1; row < height; row++) {
-            for (int col = 1; col < width; col++) {
-                Vector2 uv = new Vector2(col / (float)(width), row / (float)(height)); // Range [0, 1]
-                int vertIdx = row * width + col;
-                int triangleIdx = numTrianglesGenerated * 3;
-
+        for (int row = 1; row < bgTextureSize; row++) {
+            for (int col = 1; col < bgTextureSize; col++) {
+                int newVertIdx = row * bgTextureSize + col;
                 // Previous Row
-                int vertA = vertIdx - 1 - width;
-                int vertB = vertIdx - width;
+                int vertA = newVertIdx - 1 - bgTextureSize;
+                int vertB = newVertIdx - bgTextureSize;
                 // Current Row
-                int vertC = vertIdx - 1;
-                int vertD = vertIdx;
+                int vertC = newVertIdx - 1;
+                int vertD = newVertIdx;
 
-                // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to form triangles.
-                bool hasFgVert = false;
+                // If this is part of the original, need to check to see if we want to form triangles.
+                // Otherwise just form triangles.
+                // Inset the start row/col by 1 to allow the frame to connect.
+                if (row >= originalStartRow + 1 && row < originalEndRow && col >= originalStartColumn + 1 && col < originalEndColumn) {
+                    int originalRow = row - originalStartRow;
+                    int originalCol = col - originalStartColumn;
+                    int originalVertIdx = originalRow * width + originalCol;
 
-                // Check previous row
-                if (row > 0) {
-                    if (col > 0) {
-                        // Check previous column
-                        if (!isBg[vertA]) { hasFgVert = true; }
+                    // Previous Row
+                    int ogVertA = originalVertIdx - 1 - width;
+                    int ogVertB = originalVertIdx - width;
+                    // Current Row
+                    int ogVertC = originalVertIdx - 1;
+                    int ogVertD = originalVertIdx;
+
+                    // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to form triangles.
+                    bool hasFgVert = false;
+
+                    // Check previous row
+                    if (originalRow > 0) {
+                        if (originalCol > 0) {
+                            // Check previous column
+                            if (!isBg[ogVertA]) { hasFgVert = true; }
+                        }
+                        if (!isBg[ogVertB]) { hasFgVert = true; }
                     }
-                    if (!isBg[vertB]) { hasFgVert = true; }
+                    // Check current Row
+                    if (originalCol > 0) {
+                        // Check previous column
+                        if (!isBg[ogVertC]) { hasFgVert = true; }
+                    }
+                    if (!isBg[ogVertD]) { hasFgVert = true; }
+                    
+                    // If there's no FG verts, just skip
+                    if (!hasFgVert) {
+                        continue;
+                    }
                 }
-                // Check current Row
-                if (col > 0) {
-                    // Check previous column
-                    if (!isBg[vertC]) { hasFgVert = true; }
-                }
-                if (!isBg[vertD]) { hasFgVert = true; }
-                
-                // If there's no FG verts, just skip
-                if (!hasFgVert) {
+
+                try {
+                    int newVertA = newVertIdxs[vertA] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertA];
+                    int newVertB = newVertIdxs[vertB] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertB]; 
+                    int newVertC = newVertIdxs[vertC] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertC]; 
+                    int newVertD = newVertIdxs[vertD] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertD]; 
+
+                    // Triangle ABC -> CBA
+                    bgTriangles.Add(newVertC);
+                    bgTriangles.Add(newVertB);
+                    bgTriangles.Add(newVertA);
+                    // Triangle BDC -> CDB
+                    bgTriangles.Add(newVertC);
+                    bgTriangles.Add(newVertD);
+                    bgTriangles.Add(newVertB);
+                } catch (ArgumentNullException) {
+                    Debug.LogError("Vertex was null for x="+col+" y="+row);
                     continue;
                 }
-
-                int dupVertA = newVertIdxs[vertA] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertA];
-                int dupVertB = newVertIdxs[vertB] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertB]; 
-                int dupVertC = newVertIdxs[vertC] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertC]; 
-                int dupVertD = newVertIdxs[vertD] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertD]; 
-
-                // Triangle ABC -> CBA
-                perimeterTriangles.Add(dupVertC);
-                perimeterTriangles.Add(dupVertB);
-                perimeterTriangles.Add(dupVertA);
-                // Triangle BDC -> CDB
-                perimeterTriangles.Add(dupVertC);
-                perimeterTriangles.Add(dupVertD);
-                perimeterTriangles.Add(dupVertB);
             }
         }
 
@@ -582,9 +668,9 @@ public class MeshGeneration : EditorWindow {
         var rawData = System.IO.File.ReadAllBytes("Assets/background.png");
         bgTexture.LoadImage(rawData);
 
-        perimeterMesh.vertices = perimeterVertices.ToArray();
-        perimeterMesh.uv = perimeterUvs.ToArray();
-        perimeterMesh.triangles = perimeterTriangles.ToArray();
+        perimeterMesh.vertices = bgVertices.ToArray();
+        perimeterMesh.uv = bgUvs.ToArray();
+        perimeterMesh.triangles = bgTriangles.ToArray();
         perimeterMeshFilter.mesh = perimeterMesh;
 
         mesh.vertices = vertices;
@@ -975,4 +1061,5 @@ public class MeshGeneration : EditorWindow {
     //   - Basically generating a LOD. Plenty of algorithms out there, but one obvious optimization is that only areas with lots of detail require high triangle density
     // - Jagged borders. Fix by blurring edge only
     // TODO: Can also outpaint using DallE. Make background image a square.
+    // Problem: DallE alters the original image slightly.
 }

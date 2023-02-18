@@ -17,6 +17,7 @@ public class SceneCameraControls : EditorWindow {
     public bool ResetOnEnd = true;
     public float ZoomAmount = 0.5f;
     public float ResetCameraDistance = 2.5f;
+    public float CircleLookRadius = 0.3f;
     public Camera camera = null;
     public GameObject pivot = null;
 
@@ -146,6 +147,7 @@ public class SceneCameraControls : EditorWindow {
         Boomerang = EditorGUILayout.Toggle("Boomerang", Boomerang);
         ResetOnEnd = EditorGUILayout.Toggle("Reset On End", ResetOnEnd);
         ZoomAmount = EditorGUILayout.Slider("Zoom Amount", ZoomAmount, 0, 1.0f);
+        CircleLookRadius = EditorGUILayout.Slider("CircleLookRadius", CircleLookRadius, 0, 2.0f);
         StartAngle = EditorGUILayout.Slider("Start Angle", StartAngle, -360, 360);
         EndAngle = EditorGUILayout.Slider("End Angle", EndAngle, -360, 360);
         OrbitClockwise = EditorGUILayout.Toggle("Orbit Clockwise", OrbitClockwise);
@@ -178,6 +180,10 @@ public class SceneCameraControls : EditorWindow {
 
         if(GUILayout.Button("Orbit Animation")) {
             this.StartCoroutine(Animate(AnimationLength, Boomerang, OrbitAnimationUpdate));
+        }
+
+        if(GUILayout.Button("CircleLook Animation")) {
+            this.StartCoroutine(Animate(AnimationLength, Boomerang, CircleLookAnimationUpdate));
         }
 
         if(GUILayout.Button("Zoom Animation")) {
@@ -231,17 +237,26 @@ public class SceneCameraControls : EditorWindow {
         if (!OrbitClockwise) {
             angle = 360 - angle;
         }
-        // angle = angle / 180.0f * Mathf.PI;
 
         if (camera) {
-            angle = angle / 180.0f * Mathf.PI;
-            camera.transform.position = originalCameraPosition + 0.2f * new Vector3((float)Math.Cos(angle) - 1, (float)Math.Sin(angle), 0);
-            camera.transform.rotation = Quaternion.LookRotation(pivot.transform.position - camera.transform.position);
-            // pivot.transform.rotation = Quaternion.AngleAxis(angle, Vector3.up) * originalRotation;
+            pivot.transform.rotation = Quaternion.AngleAxis(angle, Vector3.up) * originalRotation;
         } else {
             SceneView.lastActiveSceneView.pivot = Vector3.zero;
             SceneView.lastActiveSceneView.rotation = Quaternion.AngleAxis(angle, Vector3.up) * originalRotation;
             SceneView.lastActiveSceneView.size = SizeFromCameraDistance(originalCameraDistance, fov);
+        }
+    }
+
+    void CircleLookAnimationUpdate(float t) {
+        float angle = EasingFunction.EaseInOutSine(0, 1, t) * EndAngle;
+        if (!OrbitClockwise) {
+            angle = 360 - angle;
+        }
+
+        if (camera) {
+            angle = angle / 180.0f * Mathf.PI;
+            camera.transform.position = originalCameraPosition + CircleLookRadius * new Vector3((float)Math.Cos(angle), (float)Math.Sin(angle), 0);
+            camera.transform.rotation = Quaternion.LookRotation(pivot.transform.position - camera.transform.position);
         }
     }
 
