@@ -329,7 +329,7 @@ public class MeshGeneration : EditorWindow {
 
     void SimplifyMeshV2(
         Vector3[] vertices, Vector2[] uvs, int[] triangles, 
-        bool[] isBg, bool meshIsBg, 
+        bool[]? isBg, bool meshIsBg, 
         int width, int height, 
         out Vector3[] _newVerts, out Vector2[] _newUvs, out int[] _newTriangles
     ) {
@@ -338,7 +338,7 @@ public class MeshGeneration : EditorWindow {
         for (int row = 0; row < height; row++) {
             for (int col = 0; col < width; col++) {
                 int vertIdx = row * width + col;
-                if (meshIsBg != isBg[vertIdx]) {
+                if (isBg != null && meshIsBg != isBg[vertIdx]) { // Kind of a hack since we re-use the same buffer for FG/BG meshes
                     distances[vertIdx] = float.MaxValue;
                 } else {
                     distances[vertIdx] = (Vector3.zero - vertices[vertIdx]).magnitude;
@@ -352,12 +352,14 @@ public class MeshGeneration : EditorWindow {
         int[] newVertexIdx = new int[vertices.Length];
         Dictionary<string, Vector2> regionBoundsCache = new Dictionary<string, Vector2>();
         for (int i = 0; i < newVertexIdx.Length; i++) { newVertexIdx[i] = -1; }
+        List<RectInt> regions = new List<RectInt>();
 
         SimplifyMeshRegion(
             0, width - 1, 0, height - 1, 
             distances, width, height, 
             vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx,
-            regionBoundsCache);
+            regionBoundsCache,
+            regions);
 
         // Loop through all the old triangles.
         // Determine a triangle can be skipped if any of its vertices are removed.
@@ -373,6 +375,71 @@ public class MeshGeneration : EditorWindow {
             }
         }
 
+        // Fix the gaps introduced by the simplification. This happens because of the lower resolution of the larger regions,
+        // causing the edges to be misaligned against the smaller, more detailed regions.
+        // For each regions edges, find all of the new vertices that fall on those edges.
+        // If there's a vertex that lies on this edge, need to push it to the lower resolution edge.
+        // This will just be a linear interpolation between the two points that form the endpoints of the edge.
+
+        // Vertices should only be moved once. We don't want it to be moved, then moved again later.
+        bool[] hasNewVertexBeenModified = new bool[newVertices.Count];
+        for (int i = 0; i < hasNewVertexBeenModified.Length; i++) { hasNewVertexBeenModified[i] = false; }
+        // This only works if we use the larger regions first, to move the smaller regions to align to their edges.
+        regions.Sort((RectInt rectA, RectInt rectB) => {
+            int rectAArea = rectA.width * rectA.height;
+            int rectBArea = rectB.width * rectB.height;
+            return rectBArea.CompareTo(rectAArea); // Descending order
+        });
+
+        for (int i = 0; i < regions.Count; i++) {
+            int x1 = regions[i].x;
+            int x2 = regions[i].xMax;
+            int y1 = regions[i].y;
+            int y2 = regions[i].yMax;
+
+            Vector3 vertA = vertices[y1 * width + x1];
+            Vector3 vertB = vertices[y1 * width + x2];
+            Vector3 vertC = vertices[y2 * width + x1];
+            Vector3 vertD = vertices[y2 * width + x2];
+
+            // Top Edge
+            // for (int col = x1; col <= x2; col++) {
+            //     int oldVertIdx = y1 * width + col;
+            //     int newIdx = newVertexIdx[oldVertIdx];
+            //     if (newIdx < 0 || hasNewVertexBeenModified[newIdx]) { continue; }
+            //     float t = (col - x1) / (float)regions[i].width;
+            //     newVertices[newIdx] = Vector3.Lerp(vertA, vertB, t);
+            //     hasNewVertexBeenModified[newIdx] = true;
+            // }
+            // Bottom Edge
+            for (int col = x1; col <= x2; col++) {
+                int oldVertIdx = y2 * width + col;
+                int newIdx = newVertexIdx[oldVertIdx];
+                if (newIdx < 0 || hasNewVertexBeenModified[newIdx]) { continue; }
+                float t = (col - x1) / (float)regions[i].width;
+                newVertices[newIdx] = Vector3.Lerp(vertC, vertD, t);
+                hasNewVertexBeenModified[newIdx] = true;
+            }
+            // Left Edge
+            for (int row = y1; row <= y2; row++) {
+                int oldVertIdx = row * width + x1;
+                int newIdx = newVertexIdx[oldVertIdx];
+                if (newIdx < 0 || hasNewVertexBeenModified[newIdx]) { continue; }
+                float t = (row - y1) / (float)regions[i].height;
+                newVertices[newIdx] = Vector3.Lerp(vertA, vertC, t);
+                hasNewVertexBeenModified[newIdx] = true;
+            }
+            // Right Edge
+            for (int row = y1; row <= y2; row++) {
+                int oldVertIdx = row * width + x2;
+                int newIdx = newVertexIdx[oldVertIdx];
+                if (newIdx < 0 || hasNewVertexBeenModified[newIdx]) { continue; }
+                float t = (row - y1) / (float)regions[i].height;
+                newVertices[newIdx] = Vector3.Lerp(vertB, vertD, t);
+                hasNewVertexBeenModified[newIdx] = true;
+            }
+        }
+
         _newVerts = newVertices.ToArray();
         _newUvs = newUvs.ToArray();
         _newTriangles = newTriangles.ToArray();
@@ -384,24 +451,24 @@ public class MeshGeneration : EditorWindow {
         float[] distances, int width, int height, 
         Vector3[] vertices, Vector2[] uvs, 
         List<Vector3> newVertices, List<Vector2> newUvs, List<int> newTriangles, int[] newVertexIdx,
-        Dictionary<string, Vector2> regionBoundsCache
+        Dictionary<string, Vector2> regionBoundsCache,
+        List<RectInt> regions
     ) {
-        // Debug.Log("Simplify mesh region: x1="+x1+" x2="+x2+" y1="+y1+" y2="+y2);
         int regionWidth = x2 - x1;
         int regionHeight = y2 - y1;
         int regionArea = regionWidth * regionHeight;
-        // if (regionWidth <= 2 || regionHeight <= 2) {
         if (regionArea < 4) {
-            // Debug.Log("Couldn't simplify anymore. Mesh region: x1="+x1+" x2="+x2+" y1="+y1+" y2="+y2);
             // Region could not be simplified anymore.
             // Add all the old verts to new verts
             for (int j = y1; j <= y2; j++) {
                 for (int i = x1; i <= x2; i++) {
-                    int newVertIdx = newVertices.Count;
                     int oldVertIdx = j * width + i;
-                    newVertexIdx[oldVertIdx] = newVertIdx;
-                    newVertices.Add(vertices[oldVertIdx]);
-                    newUvs.Add(uvs[oldVertIdx]);
+                    // Add the vertex if it hasn't been added before
+                    if (newVertexIdx[oldVertIdx] < 0) {
+                        newVertexIdx[oldVertIdx] = newVertices.Count;
+                        newVertices.Add(vertices[oldVertIdx]);
+                        newUvs.Add(uvs[oldVertIdx]);
+                    }
                 }
             }
             return;
@@ -410,57 +477,58 @@ public class MeshGeneration : EditorWindow {
         int xMidpoint = (x1 + x2) / 2;
         int yMidPoint = (y1 + y2) / 2;
         Vector2 bounds = ComputeRegionBounds(x1, x2, y1, y2, distances, width, regionBoundsCache);
-        // Debug.Log("Bounds Min: " + bounds.x + " Bounds Max: " + bounds.y);
         // const int minimumArea = 128;
         if ((bounds.y - bounds.x) < 0.01f /* && regionArea < minimumArea */) {
-            // Debug.Log("Simplified!!! mesh region: x1="+x1+" x2="+x2+" y1="+y1+" y2="+y2);
             // Simplify the region into two triangles.
-            // Only add the corner vertices back.
+            // Only add the corner vertices back (if they haven't been added already)
             int vertAIdx = y1 * width + x1;
             int vertBIdx = y1 * width + x2;
             int vertCIdx = y2 * width + x1;
             int vertDIdx = y2 * width + x2;
 
-            int newVertIdxBase = newVertices.Count;
-            int newVertAIdx = newVertIdxBase;
-            int newVertBIdx = newVertIdxBase + 1;
-            int newVertCIdx = newVertIdxBase + 2;
-            int newVertDIdx = newVertIdxBase + 3;
-
             // Vert A
-            newVertexIdx[vertAIdx] = newVertAIdx;
-            newVertices.Add(vertices[vertAIdx]);
-            newUvs.Add(uvs[vertAIdx]);
+            if (newVertexIdx[vertAIdx] < 0) {
+                newVertexIdx[vertAIdx] = newVertices.Count;
+                newVertices.Add(vertices[vertAIdx]);
+                newUvs.Add(uvs[vertAIdx]);
+            }
             // Vert B
-            newVertexIdx[vertBIdx] = newVertBIdx;
-            newVertices.Add(vertices[vertBIdx]);
-            newUvs.Add(uvs[vertBIdx]);
+            if (newVertexIdx[vertBIdx] < 0) {
+                newVertexIdx[vertBIdx] = newVertices.Count;
+                newVertices.Add(vertices[vertBIdx]);
+                newUvs.Add(uvs[vertBIdx]);
+            }
             // Vert C
-            newVertexIdx[vertCIdx] = newVertCIdx;
-            newVertices.Add(vertices[vertCIdx]);
-            newUvs.Add(uvs[vertCIdx]);
+            if (newVertexIdx[vertCIdx] < 0) {
+                newVertexIdx[vertCIdx] = newVertices.Count;
+                newVertices.Add(vertices[vertCIdx]);
+                newUvs.Add(uvs[vertCIdx]);
+            }
             // Vert D
-            newVertexIdx[vertDIdx] = newVertDIdx;
-            newVertices.Add(vertices[vertDIdx]);
-            newUvs.Add(uvs[vertDIdx]);
+            if (newVertexIdx[vertDIdx] < 0) {
+                newVertexIdx[vertDIdx] = newVertices.Count;
+                newVertices.Add(vertices[vertDIdx]);
+                newUvs.Add(uvs[vertDIdx]);
+            }
             
             // Triangle ABC -> CBA
-            newTriangles.Add(newVertCIdx);
-            newTriangles.Add(newVertBIdx);
-            newTriangles.Add(newVertAIdx);
+            newTriangles.Add(newVertexIdx[vertCIdx]);
+            newTriangles.Add(newVertexIdx[vertBIdx]);
+            newTriangles.Add(newVertexIdx[vertAIdx]);
             // Triangle BDC -> CDB
-            newTriangles.Add(newVertCIdx);
-            newTriangles.Add(newVertDIdx);
-            newTriangles.Add(newVertBIdx);
+            newTriangles.Add(newVertexIdx[vertCIdx]);
+            newTriangles.Add(newVertexIdx[vertDIdx]);
+            newTriangles.Add(newVertexIdx[vertBIdx]);
+
+            regions.Add(new RectInt(x1, y1, x2 - x1, y2 - y1));
         } else {
-            SimplifyMeshRegion(x1, xMidpoint, y1, yMidPoint, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache);
-            SimplifyMeshRegion(xMidpoint, x2, y1, yMidPoint, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache);
-            SimplifyMeshRegion(x1, xMidpoint, yMidPoint, y2, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache);
-            SimplifyMeshRegion(xMidpoint, x2, yMidPoint, y2, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache);
+            SimplifyMeshRegion(x1, xMidpoint, y1, yMidPoint, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache, regions);
+            SimplifyMeshRegion(xMidpoint, x2, y1, yMidPoint, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache, regions);
+            SimplifyMeshRegion(x1, xMidpoint, yMidPoint, y2, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache, regions);
+            SimplifyMeshRegion(xMidpoint, x2, yMidPoint, y2, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache, regions);
         }
     }
 
-    // Think of it like pixels
     void SimplifyMesh(Vector3[] vertices, Vector2[] uvs, int[] triangles, bool[] isBg, bool meshIsBg, int width, int height, out Vector3[] _newVerts, out Vector2[] _newUvs, out int[] _newTriangles) {
         int neighborhoodRadius = 2;
         int neighborhoodSize = neighborhoodRadius * 2 + 1;
@@ -941,7 +1009,9 @@ public class MeshGeneration : EditorWindow {
         File.WriteAllBytes("Assets/background.png", bgTexture.EncodeToPNG());
         bgTexture.LoadImage(System.IO.File.ReadAllBytes("Assets/background.png"));
 
-        GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
+        Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
+        SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), isBg, true, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified);
+        GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
 
         // For the background, we want it to use the larger, generated background texture that the hallucinated mesh will also use.
         // This will make sure there aren't any seams between the hallucinated region and the background mesh.
@@ -959,6 +1029,8 @@ public class MeshGeneration : EditorWindow {
         SimplifyMeshV2(vertices, transformedUvs, bgTriangles.ToArray(), isBg, true, width, height, out bgVertsSimplified, out bgUvsSimplified, out bgTrianglesSimplified);
         GenerateMesh("Background", bgVertsSimplified, bgUvsSimplified, bgTrianglesSimplified, bgTexture, rootObj.transform);
 
+        // TODO: Need to weld the hallucinated mesh to the background mesh
+        // or: maybe simpler to just combine the bg and the hallucinated meshes
         GenerateMesh("Hallucinated", hallucinatedVertices.ToArray(), hallucinatedUvs.ToArray(), hallucinatedTriangles.ToArray(), bgTexture, rootObj.transform);
 
         yield return null;
