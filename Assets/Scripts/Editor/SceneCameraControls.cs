@@ -9,6 +9,7 @@ using UnityEditor;
 public class SceneCameraControls : EditorWindow {
     public float AnimationLength = 2;
     public int FPS = 60;
+    public int Loops = 3;
     public bool SaveFrames = false;
     public float StartAngle = 0;
     public float EndAngle = 180;
@@ -143,6 +144,7 @@ public class SceneCameraControls : EditorWindow {
         }
 
         FPS = EditorGUILayout.IntSlider("FPS", FPS, 1, 240);
+        Loops = EditorGUILayout.IntSlider("# of Loops", Loops, 1, 10);
         SaveFrames = EditorGUILayout.Toggle("Save Frames", SaveFrames);
         Boomerang = EditorGUILayout.Toggle("Boomerang", Boomerang);
         ResetOnEnd = EditorGUILayout.Toggle("Reset On End", ResetOnEnd);
@@ -179,15 +181,15 @@ public class SceneCameraControls : EditorWindow {
         }
 
         if(GUILayout.Button("Orbit Animation")) {
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, OrbitAnimationUpdate));
+            this.StartCoroutine(Animate(AnimationLength, Boomerang, OrbitAnimationUpdate, null, Loops));
         }
 
         if(GUILayout.Button("CircleLook Animation")) {
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, CircleLookAnimationUpdate));
+            this.StartCoroutine(Animate(AnimationLength, Boomerang, CircleLookAnimationUpdate, null, Loops));
         }
 
         if(GUILayout.Button("Zoom Animation")) {
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, ZoomAnimationUpdate));
+            this.StartCoroutine(Animate(AnimationLength, Boomerang, ZoomAnimationUpdate, null, Loops));
         }
 
         if(GUILayout.Button("Look Animation")) {
@@ -283,92 +285,107 @@ public class SceneCameraControls : EditorWindow {
         SceneView.lastActiveSceneView.rotation = Quaternion.LookRotation((lookatTarget - originalCameraPosition));
     }
 
+    IEnumerator RepeatFor(int loops, IEnumerator coroutine) {
+        int loopCount = 0;
+        while (loopCount < loops) {
+            Debug.Log("Loop: " + loopCount);
+            yield return this.StartCoroutine(coroutine);
+            loopCount++;
+        }
+
+        yield return null;
+    }
+
     // Enabling boomerang will playback the animation twice as fast, and reverse the animation after its complete.
-    IEnumerator Animate(float duration, bool boomerang, Action<float> update, Action callback = null) {
-        int numFrames = (int)(duration * FPS);
-        float timePerFrame = 1.0f / FPS;
+    IEnumerator Animate(float duration, bool boomerang, Action<float> update, Action callback = null, int loops = 0) {
+        int loopCount = 0;
+        while (loopCount < loops) {
+            int numFrames = (int)(duration * FPS);
+            float timePerFrame = 1.0f / FPS;
 
-        // Init
-        if (camera) {
-            originalRotation = camera.transform.rotation;
-            originalPivot = pivot.transform.position;
-            originalPivotRotation = pivot.transform.rotation;
-            originalCameraPosition = camera.transform.position;
-            originalCameraDistance = (pivot.transform.position - originalCameraPosition).magnitude;
-            fov = camera.fieldOfView / 360.0f * 2 * Mathf.PI;
-        } else {
-            originalRotation = SceneView.lastActiveSceneView.rotation;
-            originalSize = SceneView.lastActiveSceneView.size;
-            originalPivot = SceneView.lastActiveSceneView.pivot;
-            originalCameraPosition = SceneView.lastActiveSceneView.camera.transform.position;
-            originalCameraDistance = (SceneView.lastActiveSceneView.camera.transform.position - originalPivot).magnitude;
-            fov = SceneView.lastActiveSceneView.camera.fieldOfView / 360.0f * 2 * Mathf.PI;
-        }
-
-        previousTime = EditorApplication.timeSinceStartup;
-        playbackDirection = 1;
-        t = 0;
-        animationTime = 0;
-        framesRendered = 0;
-
-        float stepSize = 1.0f / (numFrames - 1);
-        if (boomerang) {
-            stepSize *= 2;
-        }
-
-        // Prep screen recording
-        // creates off-screen render texture that can rendered into
-        captureRect = camera.pixelRect;
-        int captureWidth = (int)captureRect.width;
-        int captureHeight = (int)captureRect.height;
-        renderTexture = new RenderTexture(captureWidth, captureHeight, 24);
-        screenShot = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false);
-
-        while (framesRendered < numFrames) {
-            double deltaTime = EditorApplication.timeSinceStartup - previousTime;
-            previousTime = EditorApplication.timeSinceStartup;
-
-            animationTime += deltaTime; // amount of time elapsed during this animation
-
-            // If not enough time has elapsed, skip this update.
-            if (animationTime < framesRendered * timePerFrame) {
-                yield return null;
-                continue;
-            }
-
-            update(t);
-
-            // Save screenshot if needed
-            if (SaveFrames) {
-                SaveFrame();
-            }
-
-            // Advance time
-            t += stepSize * playbackDirection;
-            framesRendered += 1;
-            if (playbackDirection > 0 && t > 1) {
-                t = 1;
-                if (boomerang) {
-                    playbackDirection = -1;
-                }
-            } else if (playbackDirection < 0 && t < 0) {
-                t = 0;
-            }
-
-            yield return new WaitForSeconds(timePerFrame);
-        }
-
-        if (ResetOnEnd) {
-            // Reset camera
+            // Init
             if (camera) {
-                camera.transform.rotation = originalRotation;
-                camera.transform.position = originalCameraPosition;
+                originalRotation = camera.transform.rotation;
+                originalPivot = pivot.transform.position;
+                originalPivotRotation = pivot.transform.rotation;
+                originalCameraPosition = camera.transform.position;
+                originalCameraDistance = (pivot.transform.position - originalCameraPosition).magnitude;
+                fov = camera.fieldOfView / 360.0f * 2 * Mathf.PI;
             } else {
-                SceneView.lastActiveSceneView.rotation = originalRotation;
-                SceneView.lastActiveSceneView.size = originalSize;
-                SceneView.lastActiveSceneView.pivot = originalPivot;
-                SceneView.lastActiveSceneView.Repaint();
+                originalRotation = SceneView.lastActiveSceneView.rotation;
+                originalSize = SceneView.lastActiveSceneView.size;
+                originalPivot = SceneView.lastActiveSceneView.pivot;
+                originalCameraPosition = SceneView.lastActiveSceneView.camera.transform.position;
+                originalCameraDistance = (SceneView.lastActiveSceneView.camera.transform.position - originalPivot).magnitude;
+                fov = SceneView.lastActiveSceneView.camera.fieldOfView / 360.0f * 2 * Mathf.PI;
             }
+
+            previousTime = EditorApplication.timeSinceStartup;
+            playbackDirection = 1;
+            t = 0;
+            animationTime = 0;
+            framesRendered = 0;
+
+            float stepSize = 1.0f / (numFrames - 1);
+            if (boomerang) {
+                stepSize *= 2;
+            }
+
+            // Prep screen recording
+            // creates off-screen render texture that can rendered into
+            captureRect = camera.pixelRect;
+            int captureWidth = (int)captureRect.width;
+            int captureHeight = (int)captureRect.height;
+            renderTexture = new RenderTexture(captureWidth, captureHeight, 24);
+            screenShot = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false);
+
+            while (framesRendered < numFrames) {
+                double deltaTime = EditorApplication.timeSinceStartup - previousTime;
+                previousTime = EditorApplication.timeSinceStartup;
+
+                animationTime += deltaTime; // amount of time elapsed during this animation
+
+                // If not enough time has elapsed, skip this update.
+                if (animationTime < framesRendered * timePerFrame) {
+                    yield return null;
+                    continue;
+                }
+
+                update(t);
+
+                // Save screenshot if needed
+                if (SaveFrames) {
+                    SaveFrame();
+                }
+
+                // Advance time
+                t += stepSize * playbackDirection;
+                framesRendered += 1;
+                if (playbackDirection > 0 && t > 1) {
+                    t = 1;
+                    if (boomerang) {
+                        playbackDirection = -1;
+                    }
+                } else if (playbackDirection < 0 && t < 0) {
+                    t = 0;
+                }
+
+                yield return new WaitForSeconds(timePerFrame);
+            }
+
+            if (ResetOnEnd) {
+                // Reset camera
+                if (camera) {
+                    camera.transform.rotation = originalRotation;
+                    camera.transform.position = originalCameraPosition;
+                } else {
+                    SceneView.lastActiveSceneView.rotation = originalRotation;
+                    SceneView.lastActiveSceneView.size = originalSize;
+                    SceneView.lastActiveSceneView.pivot = originalPivot;
+                    SceneView.lastActiveSceneView.Repaint();
+                }
+            }
+            loopCount++;
         }
 
         if (callback != null) callback();
