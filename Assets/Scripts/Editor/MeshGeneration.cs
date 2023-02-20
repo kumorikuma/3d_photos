@@ -13,7 +13,16 @@ public class MeshGeneration : EditorWindow {
     Texture2D DepthImage;
     Texture2D ForegroundImage;
     MeshFilter InputMesh;
-    bool RunFiltering = true;
+    bool RunMedianFilter = true;
+    bool RunMeshSmoothingFilter = true;
+    bool SmoothForegroundEdges = true;
+    bool ProjectFromOrigin = true;
+    bool ConvertDepthValuesFromDisparity = true;
+    bool GenerateInpaintedRegion = true;
+    bool GenerateOutpaintedRegion = true;
+    bool PerformMeshSimplification = true;
+    int MinimumMeshDensity = 128; // Area must be greater than this
+    
     // Field of view that the photo was taken in.
     // Viewing FOV actually doesn't matter.
     float cameraHorizontalFov = 45.0f;
@@ -69,9 +78,14 @@ public class MeshGeneration : EditorWindow {
         // To caluculate the hFOV and vFov...
         cameraHorizontalFov = EditorGUILayout.Slider("Camera Horizontal FOV", cameraHorizontalFov, 30.0f, 120.0f);
         cameraVerticalFov = EditorGUILayout.Slider("Camera Vertical FOV", cameraVerticalFov, 30.0f, 120.0f);
-        deltaThreshold = EditorGUILayout.Slider("Delta Threshold", deltaThreshold, 0, 1);
-        InputMesh = EditorGUILayout.ObjectField("Mesh to Process", InputMesh, typeof(MeshFilter), true) as MeshFilter;
-        RunFiltering = EditorGUILayout.Toggle("Enable Filtering", RunFiltering);
+        ProjectFromOrigin = EditorGUILayout.Toggle("Project Mesh from Origin", ProjectFromOrigin);
+        ConvertDepthValuesFromDisparity = EditorGUILayout.Toggle("Depth stored as Disparity", ConvertDepthValuesFromDisparity);
+        RunMedianFilter = EditorGUILayout.Toggle("Remove Outliers", RunMedianFilter);
+        RunMeshSmoothingFilter = EditorGUILayout.Toggle("Smooth Mesh", RunMeshSmoothingFilter);
+        SmoothForegroundEdges = EditorGUILayout.Toggle("Smooth Foreground Edges", SmoothForegroundEdges);
+        GenerateInpaintedRegion = EditorGUILayout.Toggle("Fill Occluded Regions", GenerateInpaintedRegion);
+        GenerateOutpaintedRegion = EditorGUILayout.Toggle("Extend Mesh Outwards", GenerateOutpaintedRegion);
+        PerformMeshSimplification = EditorGUILayout.Toggle("Simplify Mesh", PerformMeshSimplification);
         // For making tooltips
         // new GUIContent("Test Float", "Here is a tooltip")
 
@@ -327,22 +341,21 @@ public class MeshGeneration : EditorWindow {
         }
     }
 
+    // Vertices / UVs needs to be a 2D array of width * height.
     void SimplifyMeshV2(
         Vector3[] vertices, Vector2[] uvs, int[] triangles, 
-        bool[]? isBg, bool meshIsBg, 
+        bool[] vertexMask, bool vertexMaskFlag, // Filters out certain vertices from being used
         int width, int height, 
         out Vector3[] _newVerts, out Vector2[] _newUvs, out int[] _newTriangles
     ) {
         // Compute distances.
         float[] distances = new float[width * height];
-        for (int row = 0; row < height; row++) {
-            for (int col = 0; col < width; col++) {
-                int vertIdx = row * width + col;
-                if (isBg != null && meshIsBg != isBg[vertIdx]) { // Kind of a hack since we re-use the same buffer for FG/BG meshes
-                    distances[vertIdx] = float.MaxValue;
-                } else {
-                    distances[vertIdx] = (Vector3.zero - vertices[vertIdx]).magnitude;
-                }
+        for (int i = 0; i < distances.Length; i++) { distances[i] = float.MaxValue; } // Use float.MaxValue as a marker for this was not set
+        for (int vertIdx = 0; vertIdx < vertices.Length; vertIdx++) {
+            if (vertexMaskFlag != vertexMask[vertIdx]) {
+                continue;
+            } else {
+                distances[vertIdx] = (Vector3.zero - vertices[vertIdx]).magnitude;
             }
         }
 
@@ -479,8 +492,7 @@ public class MeshGeneration : EditorWindow {
         int xMidpoint = (x1 + x2) / 2;
         int yMidPoint = (y1 + y2) / 2;
         Vector2 bounds = ComputeRegionBounds(x1, x2, y1, y2, distances, width, regionBoundsCache);
-        // const int minimumArea = 128;
-        if ((bounds.y - bounds.x) < 0.01f /* && regionArea < minimumArea */) {
+        if ((bounds.y - bounds.x) < 0.01f && regionArea < MinimumMeshDensity) {
             // Simplify the region into two triangles.
             // Only add the corner vertices back (if they haven't been added already)
             int vertAIdx = y1 * width + x1;
@@ -553,42 +565,52 @@ public class MeshGeneration : EditorWindow {
         }
     }
 
-    IEnumerator Generate3DPhotoV4(Texture2D _colorImage, Texture2D _depthImage, Texture2D _foregroundImage) {
-        bool projectFromOrigin = true;
-        bool convertDepthValuesFromDisparity = true;
+    int ConvertVertexCoordinates(int index, int width, int colOffset, int rowOffset, int newWidth) {
+        int col = index % width;
+        int row = (index - col) / width;
+        int newIndex = (row + rowOffset) * newWidth + (col + colOffset);
+        return newIndex;
+    }
 
+    IEnumerator Generate3DPhotoV4(Texture2D _colorImage, Texture2D _depthImage, Texture2D _foregroundImage) {
+        // When importing a texture, "Read/Write" is disabled.
+        // This creates a copy of the texture that has read enabled.
         Texture2D depthImage = GetReadableTexture(_depthImage);
         Texture2D fgImage = GetReadableTexture(_foregroundImage, false);
         Texture2D colorImage = GetReadableTexture(_colorImage, false);
+        Color32[] depthPixels = depthImage.GetPixels32(0);
+        Color32[] fgPixels = fgImage.GetPixels32(0);
 
         GameObject rootObj = new GameObject("3D Photo");
 
-        // Number of vertices on each side is equal to pixels + 1
+        // For each pixel, we'll have four vertices, one for each corner.
+        // Then we will form two triangles covering the square that is the pixel.
+        // Total number of vertices on each side is equal to pixels + 1.
+        // TODO: Insert image here
         int width = depthImage.width + 1;
         int height = depthImage.height + 1;
         int numVerts = width * height;
         Vector3[] vertices = new Vector3[numVerts];
-        bool[] isBg = new bool[numVerts];
         Vector2[] uvs = new Vector2[numVerts];
+
+        // We're going to re-use this same vertex buffer for different meshes,
+        // so we will also establish a vertexMask to mark which ones to use.
+        bool[] bgVertexMask = new bool[numVerts]; // fgVertexMask is just the opposite of this
         List<int> bgTriangles = new List<int>(); // # of tris is variable
         List<int> fgTriangles = new List<int>(); // # of tris is variable
 
-        Vector3 origin = Vector3.zero;
-        Color32[] depthPixels = depthImage.GetPixels32(0);
-        // Color[] depthPixels = FilterImage(depthImage.GetPixels32(0), depthImage.width, depthImage.height);
-        Color32[] fgPixels = fgImage.GetPixels32(0);
         // Create vertices
         for (int row = 0; row < height; row++) {
             for (int col = 0; col < width; col++) {
                 int vertIdx = row * width + col;
                 Vector2 uv = new Vector2(col / (float)(width), row / (float)(height)); // Range [0, 1]
 
+                // The "depth" value stored in many depth maps such as those from iOS are actually storing a "disparity" value,
+                // and not the actual distance from the pixel to the camera.
+                // More about disparity: https://stackoverflow.com/questions/17607312/what-is-the-difference-between-a-disparity-map-and-a-disparity-image-in-stereo-m
                 float disparityDepth = SampleTexture(uv, depthPixels, depthImage.width, depthImage.height).r;
-                Vector2 angles = new Vector2(degToRad((uv.x - 0.5f) * cameraHorizontalFov), degToRad((uv.y - 0.5f) * cameraVerticalFov)); 
-                Vector3 viewingDirection = (new Vector3((float)Math.Sin(angles.x), (float)Math.Sin(angles.y), (float)Math.Cos(angles.x))).normalized;
-
                 float depth = disparityDepth;
-                if (convertDepthValuesFromDisparity) {
+                if (ConvertDepthValuesFromDisparity) {
                     // Apply a conversion from disparity depth to actual z value
                     // Change in foreground has little effect. Change in background has a lot of effect.
                     // As a result, need to apply distance thresholding.
@@ -597,24 +619,34 @@ public class MeshGeneration : EditorWindow {
                     depth = (depth - 0.5f) / (maxDepth - 0.5f); // Range [0.0, 1.0]
                 }
 
+                // Any transparent pixels in the foreground image are considered part of the background.
                 bool isBackground = SampleTexture(uv, fgPixels, fgImage.width, fgImage.height).a < 0.01f;
 
                 Vector3 vertex;
-                if (projectFromOrigin) {
-                    // Project from virtual camera position out 
-                    vertex = viewingDirection * (depth + 1);
+                if (ProjectFromOrigin) {
+                    // Project from the virtual camera position out in a direction. Use the depth as the distance along this projection.
+                    Vector2 angles = new Vector2(degToRad((uv.x - 0.5f) * cameraHorizontalFov), degToRad((uv.y - 0.5f) * cameraVerticalFov)); 
+                    Vector3 viewingDirection = (new Vector3((float)Math.Sin(angles.x), (float)Math.Sin(angles.y), (float)Math.Cos(angles.x))).normalized;
+                    vertex = viewingDirection * (depth + 1); // Add one here because otherwise some vertices will be at the projection origin when depth = 0
                 } else {
-                    // Without using projection
+                    // Naive method that just straight up uses the depth as the z-value without using projection
                     vertex = new Vector3(uv.x * 2 - 1, uv.y * 2 - 1, depth); 
                 }
 
                 vertices[vertIdx] = vertex;
                 uvs[vertIdx] = uv;
-                isBg[vertIdx] = isBackground;
+                bgVertexMask[vertIdx] = isBackground;
             }
         }
        
         // Generate triangles. We only generate triangles in pairs to ensure there are only quads in our topology.
+        // TODO: Insert image here
+        // The quad has:
+        // - Top left corner A
+        // - Top right corner B
+        // - Bottom left corner C
+        // - Bottom right corner D
+        // This loops over every "D" vertex. So we start from row = 1, col = 1 to avoid out of bounds.
         for (int row = 1; row < height; row++) {
             for (int col = 1; col < width; col++) {
                 int vertIdx = row * width + col;
@@ -623,91 +655,96 @@ public class MeshGeneration : EditorWindow {
                 int vertC = vertIdx - 1;
                 int vertD = vertIdx;
                 // Triangle ABC -> CBA
-                float deltaAB = (vertices[vertA] - vertices[vertB]).magnitude;
-                float deltaBC = (vertices[vertB] - vertices[vertC]).magnitude;
-                float deltaAC = (vertices[vertA] - vertices[vertC]).magnitude;
-                bool abThresholdExceeded = deltaAB > deltaThreshold;
-                bool bcThresholdExceeded = deltaBC > deltaThreshold;
-                bool acThresholdExceeded = deltaAC > deltaThreshold;
-                bool distanceThresholdExceeded = abThresholdExceeded || bcThresholdExceeded || acThresholdExceeded;
-                distanceThresholdExceeded = false;
-                if (!distanceThresholdExceeded) {
-                    bool isBackgroundTriangle = isBg[vertC] && isBg[vertB] && isBg[vertA];
-                    bool isForegroundTriangle = !isBg[vertC] && !isBg[vertB] && !isBg[vertA];
-                    if (isBackgroundTriangle) {
-                        bgTriangles.Add(vertC);
-                        bgTriangles.Add(vertB);
-                        bgTriangles.Add(vertA);
-                    }
-                    if (isForegroundTriangle) {
-                        fgTriangles.Add(vertC);
-                        fgTriangles.Add(vertB);
-                        fgTriangles.Add(vertA);
-                    }
+                bool isBackgroundTriangle = bgVertexMask[vertC] && bgVertexMask[vertB] && bgVertexMask[vertA];
+                bool isForegroundTriangle = !bgVertexMask[vertC] && !bgVertexMask[vertB] && !bgVertexMask[vertA];
+                if (isBackgroundTriangle) {
+                    bgTriangles.Add(vertC);
+                    bgTriangles.Add(vertB);
+                    bgTriangles.Add(vertA);
+                }
+                if (isForegroundTriangle) {
+                    fgTriangles.Add(vertC);
+                    fgTriangles.Add(vertB);
+                    fgTriangles.Add(vertA);
                 }
                 // Triangle BDC -> CDB
-                float deltaBD = (vertices[vertB] - vertices[vertD]).magnitude;
-                float deltaDC = (vertices[vertD] - vertices[vertC]).magnitude;
-                distanceThresholdExceeded = deltaBD > deltaThreshold || deltaBC > deltaThreshold || deltaDC > deltaThreshold;
-                distanceThresholdExceeded = false;
-                if (!distanceThresholdExceeded) {
-                    bool isBackgroundTriangle = isBg[vertC] && isBg[vertD] && isBg[vertB];
-                    bool isForegroundTriangle = !isBg[vertC] && !isBg[vertD] && !isBg[vertB];
-                    if (isBackgroundTriangle) {
-                        bgTriangles.Add(vertC);
-                        bgTriangles.Add(vertD);
-                        bgTriangles.Add(vertB);
-                    }
-                    if (isForegroundTriangle) {
-                        fgTriangles.Add(vertC);
-                        fgTriangles.Add(vertD);
-                        fgTriangles.Add(vertB);
-                    }
+                isBackgroundTriangle = bgVertexMask[vertC] && bgVertexMask[vertD] && bgVertexMask[vertB];
+                isForegroundTriangle = !bgVertexMask[vertC] && !bgVertexMask[vertD] && !bgVertexMask[vertB];
+                if (isBackgroundTriangle) {
+                    bgTriangles.Add(vertC);
+                    bgTriangles.Add(vertD);
+                    bgTriangles.Add(vertB);
+                }
+                if (isForegroundTriangle) {
+                    fgTriangles.Add(vertC);
+                    fgTriangles.Add(vertD);
+                    fgTriangles.Add(vertB);
                 }
             }
         }
 
-        Debug.Log("Vertex count: " + numVerts);
+        Debug.Log("Total Vertex count: " + numVerts);
         Debug.Log("Triangle count in background mesh: " + bgTriangles.Count);
         Debug.Log("Triangle count in foreground mesh: " + fgTriangles.Count);
 
-        // Filter the mesh
-        // Run a median filter on the positions to smooth it out.
-        // Border behavior: clamp
-        if (RunFiltering) {
-            // This is by far the slowest part of the algorithm
-            vertices = FilterVertices(vertices, isBg, width, height, 4, true); // Median Filter
-            vertices = FilterVertices(vertices, isBg, width, height); // Average
-            vertices = FilterFgBorderVertices(vertices, isBg, width, height); // Average
-            vertices = FilterFgBorderVertices(vertices, isBg, width, height); // Average
+        // Resulting mesh ends up having a lot of imperfections which can be mitigated using filters.
+        // This is by far the slowest part of the algorithm.
+        // Use border behavior: clamp.
+        if (RunMedianFilter) {
+            // First run a median filter to remove any outliers
+            vertices = FilterVertices(vertices, bgVertexMask, width, height, 4, true);
+        }
+        if (RunMeshSmoothingFilter) {
+            // Then run an averaging (or blurring) filter to smooth out the mesh
+            vertices = FilterVertices(vertices, bgVertexMask, width, height); // Average
+        }
+        if (SmoothForegroundEdges) {
+            // The edges in the foreground can be very jagged. 
+            // Run averaging filter on only the foreground edge vertices to smooth out the jaggies.
+            vertices = FilterFgBorderVertices(vertices, bgVertexMask, width, height); // Average
+            vertices = FilterFgBorderVertices(vertices, bgVertexMask, width, height); // Average
         }
 
-        // Generate Mesh that needs to be inpainted.
-        // This mesh doesn't exist in the original POV, hence "hallucinated."
-        List<Vector3> hallucinatedVertices = new List<Vector3>();
-        List<Vector2> hallucinatedUvs = new List<Vector2>();
-        List<int> hallucinatedTriangles = new List<int>();
+        // To handle viewing of the occluded regions, we will extend the background mesh by filling in the holes left by the foreground mesh.
+        // To handle viewing of regions that are slightly outside the original viewing constraints, we will extend the background mesh outwards slightly.
+        // The extended background mesh will use a new texture with the foreground removed, that can be inpainted and outpainted using an external inpainting system like Dall-E.
+        // The extended mesh will need to be bigger, and since Dall-E likes its textures square, we'll simply just round up the nearest power of two.
+        // Note: Originally the original background and hallucinated mesh areas were separate. However they are best kept together for two reasons:
+        // - The original background should use the same texture as the hallucinated mesh. Dall-E changes the original image pixels slightly when inpainting,
+        // which can cause seams between the hallucinated regions and the background.
+        // - Mesh simplification needs to weld the hallucinated region to the original background, and this is a lot simpler if they are one mesh.
+        int extendedBgTextureSize = Mathf.Max(ToNextNearestPowerOf2(width), ToNextNearestPowerOf2(height));
+        int extendedBgWidth = extendedBgTextureSize; // TODO: +1?
+        int extendedBgHeight = extendedBgTextureSize; // TODO: +1?
+        if (!GenerateOutpaintedRegion) {
+            extendedBgWidth = width;
+            extendedBgHeight = height;
+        }
+        int numVertsForExtendedBg = extendedBgWidth * extendedBgHeight;
+        // New vertex / element buffers
+        Vector3[] extendedBgVerts = new Vector3[numVertsForExtendedBg];
+        Vector2[] extendedBgUVs = new Vector2[numVertsForExtendedBg];
+        bool[] extendedBgVertexMask = new bool[numVertsForExtendedBg];
+        List<int> extendedBgTriangles = new List<int>();
 
         // Make a new texture that uses alpha = 0 for the empty spots. Goal is to infill those spots using DallE.
         // We'll also do outpainting. The output texture will be square.
-        int bgTextureSize = Mathf.Max(ToNextNearestPowerOf2(width), ToNextNearestPowerOf2(height));
-        Texture2D bgTexture = new Texture2D(bgTextureSize, bgTextureSize);
-        Color[] colors = new Color[bgTextureSize * bgTextureSize];
+        Texture2D extendedBgTexture = new Texture2D(extendedBgWidth, extendedBgHeight);
+        Color[] colors = new Color[extendedBgWidth * extendedBgHeight];
         Color32[] colorImagePixels = colorImage.GetPixels32(0);
-        int?[] newVertIdxs = new int?[bgTextureSize * bgTextureSize];
-        // Center the original inside of the larger square
-        int originalStartRow = (int)((bgTextureSize - height) / 2.0f);
+
+        // Center the original image inside of the larger square
+        int originalStartRow = (int)((extendedBgHeight - height) / 2.0f);
         int originalEndRow = originalStartRow + height;
-        int originalStartColumn = (int)((bgTextureSize - width) / 2.0f);
+        int originalStartColumn = (int)((extendedBgWidth - width) / 2.0f);
         int originalEndColumn = originalStartColumn + width;
-        for (int row = 0; row < bgTextureSize; row++) {
-            for (int col = 0; col < bgTextureSize; col++) {
-                int newVertIdx = row * bgTextureSize + col;
-                Vector2 uv = new Vector2(col / (float)(bgTextureSize), row / (float)(bgTextureSize)); // Range [0, 1]
+        for (int row = 0; row < extendedBgHeight; row++) {
+            for (int col = 0; col < extendedBgWidth; col++) {
+                int newVertIdx = row * extendedBgWidth + col;
+                Vector2 uv = new Vector2(col / (float)(extendedBgWidth), row / (float)(extendedBgHeight)); // Range [0, 1]
 
                 // If this is part of the original...
-                // We'll inset it by 1 row/col in order to give the outpainted frame something to connect to.
-                if (row >= originalStartRow + 1 && row < originalEndRow - 1 && col >= originalStartColumn + 1 && col < originalEndColumn - 1) {
+                if (row >= originalStartRow && row < originalEndRow  && col >= originalStartColumn && col < originalEndColumn) {
                     int originalRow = row - originalStartRow;
                     int originalCol = col - originalStartColumn;
                     int originalVertIdx = originalRow * width + originalCol;
@@ -715,41 +752,27 @@ public class MeshGeneration : EditorWindow {
                     // Fill in the color
                     colors[newVertIdx] = SampleTexture(uvs[originalVertIdx], colorImagePixels, colorImage.width, colorImage.height);
 
-                    // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to duplicate it.
-                    bool hasFgVert = false;
-
-                    // Check current Row
-                    if (!isBg[originalVertIdx]) { hasFgVert = true; }
-                    if (originalCol > 0 && !isBg[originalVertIdx - 1]) { hasFgVert = true; } // Check previous column
-                    if (originalCol < width - 1 && !isBg[originalVertIdx + 1]) { hasFgVert = true; } // Check next column
-                    // Check previous row
-                    if (originalRow > 0) {
-                        int baseIdx = originalVertIdx - width;
-                        if (!isBg[baseIdx]) { hasFgVert = true; }
-                        if (originalCol > 0 && !isBg[baseIdx - 1]) { hasFgVert = true; } // Check previous column
-                        if (originalCol < width - 1 && !isBg[baseIdx + 1]) { hasFgVert = true; } // Check next column
-                    }
-                    // Check next row
-                    if (originalRow < height - 1) {
-                        int baseIdx = originalVertIdx + width;
-                        if (!isBg[baseIdx]) { hasFgVert = true; }
-                        if (originalCol > 0 && !isBg[baseIdx - 1]) { hasFgVert = true; } // Check previous column
-                        if (originalCol < width - 1 && !isBg[baseIdx + 1]) { hasFgVert = true; } // Check next column
-                    }
-                    
-                    // If there's no FG verts, just skip
-                    if (!hasFgVert) {
+                    // Add any original vertices from the background to the new buffers.
+                    if (bgVertexMask[originalVertIdx]) {
+                        extendedBgVerts[newVertIdx] = vertices[originalVertIdx];
+                        extendedBgUVs[newVertIdx] = uv;
+                        extendedBgVertexMask[newVertIdx] = true;
                         continue;
                     }
 
-                    // If it's a FG vert, we will also shift it such that it's in the background.
+                    // Skip generating the inpainted region if desired
+                    if (!GenerateInpaintedRegion) {
+                        continue;
+                    }
+
+                    // This is a foreground vertex, we'll duplicate it and shift it such that it's in the background.
                     // Take the depth of the left BG pixel and right BG pixel.
                     float lastBgDistance = 1;
                     int distanceToLast = 0;
                     for (int x = originalCol - 1; x > 0; x--) {
                         int searchVertIdx = originalRow * width + x;
                         distanceToLast++;
-                        if (isBg[searchVertIdx]) {
+                        if (bgVertexMask[searchVertIdx]) {
                             lastBgDistance = (vertices[searchVertIdx] - Vector3.zero).magnitude;
                             break;
                         }
@@ -759,7 +782,7 @@ public class MeshGeneration : EditorWindow {
                     for (int x = originalCol + 1; x < width; x++) {
                         int searchVertIdx = originalRow * width + x;
                         distanceToNext++;
-                        if (isBg[searchVertIdx]) {
+                        if (bgVertexMask[searchVertIdx]) {
                             nextBgDistance = (vertices[searchVertIdx] - Vector3.zero).magnitude;
                             break;
                         }
@@ -775,16 +798,12 @@ public class MeshGeneration : EditorWindow {
                         distance = fgDistance + 0.001f;
                     }
 
-                    // Duplicate the vertex
-                    newVertIdxs[newVertIdx] = hallucinatedVertices.Count;
-                    if (isBg[originalVertIdx]) {
-                        hallucinatedVertices.Add(vertices[originalVertIdx]);
-                    } else {
-                        Vector3 shiftedVert = Vector3.zero + vertices[originalVertIdx].normalized * distance;
-                        hallucinatedVertices.Add(shiftedVert);
-                        colors[newVertIdx] = new Color(0, 0, 0, 0);
-                    }
-                    hallucinatedUvs.Add(uv);
+                    // Create hallucinated vertex for inpainted (occluded) region
+                    Vector3 hallucinatedVert = Vector3.zero + vertices[originalVertIdx].normalized * distance;
+                    colors[newVertIdx] = new Color(0, 0, 0, 0);
+                    extendedBgVerts[newVertIdx] = hallucinatedVert;
+                    extendedBgUVs[newVertIdx] = uv;
+                    extendedBgVertexMask[newVertIdx] = true;
                 } else { // This needs to be outpainted
                     colors[newVertIdx] = new Color(0, 0, 0, 0);
 
@@ -815,112 +834,104 @@ public class MeshGeneration : EditorWindow {
                     }
                     Vector3 viewingDirection = (new Vector3((float)Math.Sin(degToRad(angles.x)), (float)Math.Sin(degToRad(angles.y)), (float)Math.Cos(degToRad(angles.x)))).normalized;
 
-                    newVertIdxs[newVertIdx] = hallucinatedVertices.Count;
-                    hallucinatedVertices.Add(Vector3.zero + viewingDirection * distanceFromOrigin);
-                    hallucinatedUvs.Add(uv);
+                    // Create hallucinated vertex for outpainted region
+                    Vector3 hallucinatedVert = Vector3.zero + viewingDirection * distanceFromOrigin;
+                    extendedBgVerts[newVertIdx] = hallucinatedVert;
+                    extendedBgUVs[newVertIdx] = uv;
+                    extendedBgVertexMask[newVertIdx] = true;
                 }    
             }
         }
 
+        // Save texture to disk to allow inpainting with third party tool
+        extendedBgTexture.SetPixels(colors);
+        File.WriteAllBytes("Assets/background.png", extendedBgTexture.EncodeToPNG());
+        extendedBgTexture.LoadImage(System.IO.File.ReadAllBytes("Assets/background.png"));
+
         // Form the triangles
-        for (int row = 1; row < bgTextureSize; row++) {
-            for (int col = 1; col < bgTextureSize; col++) {
-                int newVertIdx = row * bgTextureSize + col;
+        for (int row = 1; row < extendedBgHeight; row++) {
+            for (int col = 1; col < extendedBgWidth; col++) {
+                int newVertIdx = row * extendedBgWidth + col;
                 // Previous Row
-                int vertA = newVertIdx - 1 - bgTextureSize;
-                int vertB = newVertIdx - bgTextureSize;
+                int vertA = newVertIdx - 1 - extendedBgWidth;
+                int vertB = newVertIdx - extendedBgWidth;
                 // Current Row
                 int vertC = newVertIdx - 1;
                 int vertD = newVertIdx;
 
-                // If this is part of the original, need to check to see if we want to form triangles.
-                // Otherwise just form triangles.
-                // Inset the start row/col by 1 to allow the frame to connect.
-                if (row >= originalStartRow + 1 && row < originalEndRow && col >= originalStartColumn + 1 && col < originalEndColumn) {
-                    int originalRow = row - originalStartRow;
-                    int originalCol = col - originalStartColumn;
-                    int originalVertIdx = originalRow * width + originalCol;
+                // // If this is part of the original, need to check to see if we want to form triangles.
+                // // Otherwise just form triangles.
+                // if (row >= originalStartRow && row < originalEndRow && col >= originalStartColumn && col < originalEndColumn) {
+                //     int originalRow = row - originalStartRow;
+                //     int originalCol = col - originalStartColumn;
+                //     int originalVertIdx = originalRow * width + originalCol;
 
-                    // Previous Row
-                    int ogVertA = originalVertIdx - 1 - width;
-                    int ogVertB = originalVertIdx - width;
-                    // Current Row
-                    int ogVertC = originalVertIdx - 1;
-                    int ogVertD = originalVertIdx;
+                //     // Previous Row
+                //     int ogVertA = originalVertIdx - 1 - width;
+                //     int ogVertB = originalVertIdx - width;
+                //     // Current Row
+                //     int ogVertC = originalVertIdx - 1;
+                //     int ogVertD = originalVertIdx;
 
-                    // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to form triangles.
-                    bool hasFgVert = false;
+                //     // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to form triangles.
+                //     bool hasFgVert = false;
 
-                    // Check previous row
-                    if (originalRow > 0) {
-                        if (originalCol > 0) {
-                            // Check previous column
-                            if (!isBg[ogVertA]) { hasFgVert = true; }
-                        }
-                        if (!isBg[ogVertB]) { hasFgVert = true; }
-                    }
-                    // Check current Row
-                    if (originalCol > 0) {
-                        // Check previous column
-                        if (!isBg[ogVertC]) { hasFgVert = true; }
-                    }
-                    if (!isBg[ogVertD]) { hasFgVert = true; }
+                //     // Check previous row
+                //     if (originalRow > 0) {
+                //         if (originalCol > 0) {
+                //             // Check previous column
+                //             if (!bgVertexMask[ogVertA]) { hasFgVert = true; }
+                //         }
+                //         if (!bgVertexMask[ogVertB]) { hasFgVert = true; }
+                //     }
+                //     // Check current Row
+                //     if (originalCol > 0) {
+                //         // Check previous column
+                //         if (!bgVertexMask[ogVertC]) { hasFgVert = true; }
+                //     }
+                //     if (!bgVertexMask[ogVertD]) { hasFgVert = true; }
                     
-                    // If there's no FG verts, just skip
-                    if (!hasFgVert) {
-                        continue;
-                    }
-                }
+                //     // If there's no FG verts, just skip
+                //     if (!hasFgVert) {
+                //         continue;
+                //     }
+                // }
 
-                try {
-                    int newVertA = newVertIdxs[vertA] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertA];
-                    int newVertB = newVertIdxs[vertB] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertB]; 
-                    int newVertC = newVertIdxs[vertC] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertC]; 
-                    int newVertD = newVertIdxs[vertD] == null ? throw new ArgumentNullException() : (int)newVertIdxs[vertD]; 
-
-                    // Triangle ABC -> CBA
-                    hallucinatedTriangles.Add(newVertC);
-                    hallucinatedTriangles.Add(newVertB);
-                    hallucinatedTriangles.Add(newVertA);
-                    // Triangle BDC -> CDB
-                    hallucinatedTriangles.Add(newVertC);
-                    hallucinatedTriangles.Add(newVertD);
-                    hallucinatedTriangles.Add(newVertB);
-                } catch (ArgumentNullException) {
-                    Debug.LogError("Vertex was null for x="+col+" y="+row);
-                    continue;
-                }
+                // TODO: Add option to generate separate mesh
+                // Triangle ABC -> CBA
+                extendedBgTriangles.Add(vertC);
+                extendedBgTriangles.Add(vertB);
+                extendedBgTriangles.Add(vertA);
+                // Triangle BDC -> CDB
+                extendedBgTriangles.Add(vertC);
+                extendedBgTriangles.Add(vertD);
+                extendedBgTriangles.Add(vertB);
             }
         }
 
-        // Save texture to disk to allow inpainting with third party tool
-        bgTexture.SetPixels(colors);
-        File.WriteAllBytes("Assets/background.png", bgTexture.EncodeToPNG());
-        bgTexture.LoadImage(System.IO.File.ReadAllBytes("Assets/background.png"));
-
-        Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
-        SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), isBg, true, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified);
-        GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
-
-        // For the background, we want it to use the larger, generated background texture that the hallucinated mesh will also use.
-        // This will make sure there aren't any seams between the hallucinated region and the background mesh.
-        // When using Dall-E to hallucinate the texture, it may alter parts of the original image slightly.
-        Vector2[] transformedUvs = new Vector2[uvs.Length];
-        for (int i = 0; i < uvs.Length; i++) {
-            float originalStartU = originalStartColumn / (float)bgTextureSize;
-            float originalEndU = originalEndColumn / (float)bgTextureSize;
-            float originalStartV = originalStartRow / (float)bgTextureSize;
-            float originalEndV = originalEndRow / (float)bgTextureSize;
-            // Compress the range from [0, 1] to [originalStart, originalEnd]
-            transformedUvs[i] = new Vector2(uvs[i].x * (originalEndU - originalStartU) + originalStartU, uvs[i].y * (originalEndV - originalStartV) + originalStartV);
+        // Add the original background mesh triangles into the new element buffer.
+        // Need to update the triangles to make them point at the new correct vertices.
+        for (int i = 0; i < bgTriangles.Count; i ++) {
+            // extendedBgTriangles.Add(ConvertVertexCoordinates(bgTriangles[i], width, originalStartColumn, originalStartRow, extendedBgTextureSize));
         }
-        Vector3[] bgVertsSimplified; Vector2[] bgUvsSimplified; int[] bgTrianglesSimplified;
-        SimplifyMeshV2(vertices, transformedUvs, bgTriangles.ToArray(), isBg, true, width, height, out bgVertsSimplified, out bgUvsSimplified, out bgTrianglesSimplified);
-        GenerateMesh("Background", bgVertsSimplified, bgUvsSimplified, bgTrianglesSimplified, bgTexture, rootObj.transform);
 
-        // TODO: Need to weld the hallucinated mesh to the background mesh
-        // or: maybe simpler to just combine the bg and the hallucinated meshes
-        GenerateMesh("Hallucinated", hallucinatedVertices.ToArray(), hallucinatedUvs.ToArray(), hallucinatedTriangles.ToArray(), bgTexture, rootObj.transform);
+        // Simplify the foreground mesh and generate output
+        if (PerformMeshSimplification) {
+            Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
+            SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified);
+            GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
+        } else {
+            GenerateMesh("Foreground",vertices, uvs, fgTriangles.ToArray(), extendedBgTexture, rootObj.transform);
+        }
+
+        // Simplify the extended background mesh and generate output
+        if (PerformMeshSimplification) {
+            Vector3[] extBgVertsSimplified; Vector2[] extBgUvsSimplified; int[] extBgTrianglesSimplified;
+            SimplifyMeshV2(extendedBgVerts, extendedBgUVs, extendedBgTriangles.ToArray(), extendedBgVertexMask, true, extendedBgTextureSize, extendedBgTextureSize, out extBgVertsSimplified, out extBgUvsSimplified, out extBgTrianglesSimplified);
+            GenerateMesh("Background", extBgVertsSimplified, extBgUvsSimplified, extBgTrianglesSimplified, extendedBgTexture, rootObj.transform);
+        } else {
+            GenerateMesh("Background", extendedBgVerts.ToArray(), extendedBgUVs.ToArray(), extendedBgTriangles.ToArray(), extendedBgTexture, rootObj.transform);
+        }
 
         yield return null;
     }
@@ -931,12 +942,11 @@ public class MeshGeneration : EditorWindow {
     // TODO: Disconnect background from foreground. Any "abrupt" changes are cut.
     // Take a camera projection of *just* the background, and then missing pieces. Then we inpaint the missing pieces.
     // What about double circle obstruction? aka what about the middleground? Could just say avoid doing this.
-    // TODO: Mesh Simplification
     // TODO: What if you doubled up on the vertices at the "disconnects" and specified the colors as the background?
     // TODO: Maybe skirts fore multiple layers that are not BG, then for BG layer add the inpainted plane
-    // TODO: What if depth was exponentially scaled instead of linearly?
 
-    // Depth vs Disparity
+    // Notes:
+    // - Depth vs Disparity
 
     // Challenges:
     // - How to let users "see behind" the foreground? Need to separate bg from fg.
@@ -944,16 +954,12 @@ public class MeshGeneration : EditorWindow {
     //   - Blurred edges make edges not so clear, might need edge filter for this
     //   - How to handle gradients? 
     //   - With a lot of different heuristics and edge cases, could try to make it work, but honestly best to just have the ground truth, OR use AI bg/fg separation.
-    //     - Can use Apple's subject isolation feature (handling islands)
+    //     - Can use Apple's subject isolation feature (handling islands), or removal.ai
     // - What should be shown "behind" the foreground object? Blur the background, hallucinate the background, provide user with method to supply background info
     //   - What about the case where there should be multiple "layers"? Like boz' baby arm.
     // - Mesh density
     //   - Basically generating a LOD. Plenty of algorithms out there, but one obvious optimization is that only areas with lots of detail require high triangle density
     // - Jagged borders. Fix by blurring edge only
-    // TODO: Can also outpaint using DallE. Make background image a square.
-    // Problem: DallE alters the original image slightly.
-    // Have FG and BG mesh use separate texture.
-
-    // Mesh simplification
-    // Foreach triangle, 
+    // - Inpainting:
+    //     - Can also outpaint using DallE. Make background image a square. Problem: DallE alters the original image slightly. Solution: Have FG and BG mesh use separate texture.
 }
