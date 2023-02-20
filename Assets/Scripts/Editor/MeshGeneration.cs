@@ -397,20 +397,22 @@ public class MeshGeneration : EditorWindow {
             int y1 = regions[i].y;
             int y2 = regions[i].yMax;
 
-            Vector3 vertA = vertices[y1 * width + x1];
-            Vector3 vertB = vertices[y1 * width + x2];
-            Vector3 vertC = vertices[y2 * width + x1];
-            Vector3 vertD = vertices[y2 * width + x2];
+            // Read vertex data from the newVertices buffer because it's possible
+            // that the corners of the more detailed regions will move.
+            Vector3 vertA = newVertices[newVertexIdx[y1 * width + x1]];
+            Vector3 vertB = newVertices[newVertexIdx[y1 * width + x2]];
+            Vector3 vertC = newVertices[newVertexIdx[y2 * width + x1]];
+            Vector3 vertD = newVertices[newVertexIdx[y2 * width + x2]];
 
             // Top Edge
-            // for (int col = x1; col <= x2; col++) {
-            //     int oldVertIdx = y1 * width + col;
-            //     int newIdx = newVertexIdx[oldVertIdx];
-            //     if (newIdx < 0 || hasNewVertexBeenModified[newIdx]) { continue; }
-            //     float t = (col - x1) / (float)regions[i].width;
-            //     newVertices[newIdx] = Vector3.Lerp(vertA, vertB, t);
-            //     hasNewVertexBeenModified[newIdx] = true;
-            // }
+            for (int col = x1; col <= x2; col++) {
+                int oldVertIdx = y1 * width + col;
+                int newIdx = newVertexIdx[oldVertIdx];
+                if (newIdx < 0 || hasNewVertexBeenModified[newIdx]) { continue; }
+                float t = (col - x1) / (float)regions[i].width;
+                newVertices[newIdx] = Vector3.Lerp(vertA, vertB, t);
+                hasNewVertexBeenModified[newIdx] = true;
+            }
             // Bottom Edge
             for (int col = x1; col <= x2; col++) {
                 int oldVertIdx = y2 * width + col;
@@ -527,119 +529,6 @@ public class MeshGeneration : EditorWindow {
             SimplifyMeshRegion(x1, xMidpoint, yMidPoint, y2, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache, regions);
             SimplifyMeshRegion(xMidpoint, x2, yMidPoint, y2, distances, width, height, vertices, uvs, newVertices, newUvs, newTriangles, newVertexIdx, regionBoundsCache, regions);
         }
-    }
-
-    void SimplifyMesh(Vector3[] vertices, Vector2[] uvs, int[] triangles, bool[] isBg, bool meshIsBg, int width, int height, out Vector3[] _newVerts, out Vector2[] _newUvs, out int[] _newTriangles) {
-        int neighborhoodRadius = 2;
-        int neighborhoodSize = neighborhoodRadius * 2 + 1;
-        int numNeighbors = neighborhoodSize * neighborhoodSize;
-
-        List<Vector3> newVertices = new List<Vector3>();
-        List<Vector2> newUvs = new List<Vector2>();
-        List<int> newTriangles = new List<int>();
-        int[] newVertexIdx = new int[vertices.Length];
-        for (int i = 0; i < newVertexIdx.Length; i++) { newVertexIdx[i] = -1; }
-
-        for (int row = 1; row < height - 1; row += 2) {
-            for (int col = 1; col < width - 1; col += 2) {
-                int vertIdx = row * width + col;
-                // Find neighbors and compute the flatness.
-                // The flatness measurement will be how much the vertices deviate from the average distance from origin.
-                List<int> neighbors = new List<int>();
-                List<float> distances = new List<float>();
-                for (int j = -neighborhoodRadius; j <= neighborhoodRadius; j++) {
-                    for (int i = -neighborhoodRadius; i <= neighborhoodRadius; i++) {
-                        int neighborRow = row + j;
-                        if (neighborRow < 0) { continue; }
-                        else if (neighborRow >= height) { continue; }
-                        int neighborCol = col + i;
-                        if (neighborCol < 0) { continue; }
-                        else if (neighborCol >= width) { continue; }
-                        int neighborVertIdx = neighborRow * width + neighborCol;
-                        if (meshIsBg != isBg[neighborVertIdx]) { continue; }
-                        // if (!IsBorderVertex(neighborRow, neighborCol, width, height, isBg)) { continue; }
-                        // // TODO: Check if vertex has been processed already.
-                        neighbors.Add(neighborVertIdx);
-                        distances.Add((Vector3.zero - vertices[neighborVertIdx]).magnitude);
-                    }
-                }
-
-                // Only do simplification with a complete neighborhood
-                float maxDeltaDistance = 0;
-                if (neighbors.Count == numNeighbors) {
-                    float avgDistance = distances.Average();
-                    for (int i = 0; i < neighbors.Count; i++) {
-                        float deltaDistance = avgDistance - distances[i];
-                        if (deltaDistance > maxDeltaDistance) {
-                            maxDeltaDistance = deltaDistance;
-                        }
-                    }
-                }
-                bool shouldPerformSimplification = neighbors.Count == numNeighbors && maxDeltaDistance < 0.001f;
-                // bool shouldPerformSimplification = false;
-                int newVertIdxBase = newVertices.Count;
-                if (!shouldPerformSimplification) {
-                    // Add all vertices back
-                    for (int i = 0; i < neighbors.Count; i++) {
-                        int newVertIdx = newVertIdxBase + i;
-                        newVertexIdx[neighbors[i]] = newVertIdx;
-                        newVertices.Add(vertices[neighbors[i]]);
-                        newUvs.Add(uvs[neighbors[i]]);
-                    }
-                    continue;
-                }
-
-                // Simplify the neighborhood into smaller triangles.
-                // Only add the corner vertices back.
-                int vertAIdx = vertIdx - width - 1;
-                int newVertAIdx = newVertIdxBase;
-                int vertBIdx = vertIdx - width + 1;
-                int newVertBIdx = newVertIdxBase + 1;
-                int vertCIdx = vertIdx + width - 1;
-                int newVertCIdx = newVertIdxBase + 2;
-                int vertDIdx = vertIdx + width + 1;
-                int newVertDIdx = newVertIdxBase + 3;
-                newVertexIdx[vertAIdx] = newVertAIdx;
-                newVertices.Add(vertices[vertAIdx]);
-                newUvs.Add(uvs[vertAIdx]);
-                newVertexIdx[vertBIdx] = newVertBIdx;
-                newVertices.Add(vertices[vertBIdx]);
-                newUvs.Add(uvs[vertBIdx]);
-                newVertexIdx[vertCIdx] = newVertCIdx;
-                newVertices.Add(vertices[vertCIdx]);
-                newUvs.Add(uvs[vertCIdx]);
-                newVertexIdx[vertDIdx] = newVertDIdx;
-                newVertices.Add(vertices[vertDIdx]);
-                newUvs.Add(uvs[vertDIdx]);
-                
-                newTriangles.Add(newVertCIdx);
-                newTriangles.Add(newVertBIdx);
-                newTriangles.Add(newVertAIdx);
-
-                newTriangles.Add(newVertCIdx);
-                newTriangles.Add(newVertDIdx);
-                newTriangles.Add(newVertBIdx);
-            }
-        }
-
-        // Loop through all the old triangles.
-        // Determine a triangle can be skipped if any of its vertices are removed.
-        // Otherwise the triangle needs to be reconstructed with new vertex buffer.
-        for (int i = 0; i < triangles.Length; i += 3) {
-            int newVertA = newVertexIdx[triangles[i]];
-            int newVertB = newVertexIdx[triangles[i + 1]];
-            int newVertC = newVertexIdx[triangles[i + 2]];
-            if (newVertA >= 0 && newVertB >= 0 && newVertC >= 0) {
-                newTriangles.Add(newVertA);
-                newTriangles.Add(newVertB);
-                newTriangles.Add(newVertC);
-            }
-        }
-
-        _newVerts = newVertices.ToArray();
-        _newUvs = newUvs.ToArray();
-        _newTriangles = newTriangles.ToArray();
-        Debug.Log("Simplified tris count: " + _newTriangles.Length);
     }
 
     void GenerateMesh(string name, Vector3[] vertices, Vector2[] uvs, int[] triangles, Texture2D texture, Transform parent = null) {
