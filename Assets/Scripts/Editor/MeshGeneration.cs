@@ -22,15 +22,12 @@ public class MeshGeneration : EditorWindow {
     bool GenerateOutpaintedRegion = true;
     bool PerformMeshSimplification = true;
     int LargestSimplifiedRegionSize = 512;
-    float MaximumDeltaDistance = 0.05f;
+    float MaximumDeltaDistance = 0.01f;
     
     // Field of view that the photo was taken in.
     // Viewing FOV actually doesn't matter.
     float cameraHorizontalFov = 45.0f;
     float cameraVerticalFov = 58.0f;
-    float deltaThreshold = 0.05f;
-
-    Mesh mesh_;
 
     [MenuItem("Custom/Mesh Generation")]
     public static void OpenWindow() {
@@ -802,7 +799,7 @@ public class MeshGeneration : EditorWindow {
                     // If the distance is less than the FG vertex, then push it back behind it.
                     float fgDistance = (vertices[originalVertIdx] - Vector3.zero).magnitude;
                     if (distance < fgDistance) {
-                        distance = fgDistance + 0.001f;
+                        distance = fgDistance + 0.01f;
                     }
 
                     // Create hallucinated vertex for inpainted (occluded) region
@@ -883,13 +880,14 @@ public class MeshGeneration : EditorWindow {
         }
 
         // Simplify the foreground mesh and generate output
-        if (PerformMeshSimplification) {
-            Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
-            SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified);
-            GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
-        } else {
-            GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
-        }
+        // if (PerformMeshSimplification) {
+        //     Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
+        //     SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified);
+        //     GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
+        // } else {
+        //     GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
+        // }
+        GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
 
         // Simplify the extended background mesh and generate output
         if (PerformMeshSimplification) {
