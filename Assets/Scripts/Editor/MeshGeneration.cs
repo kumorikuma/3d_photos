@@ -21,7 +21,8 @@ public class MeshGeneration : EditorWindow {
     bool GenerateInpaintedRegion = true;
     bool GenerateOutpaintedRegion = true;
     bool PerformMeshSimplification = true;
-    int MinimumMeshDensity = 128; // Area must be greater than this
+    int LargestSimplifiedRegionSize = 512;
+    float MaximumDeltaDistance = 0.05f;
     
     // Field of view that the photo was taken in.
     // Viewing FOV actually doesn't matter.
@@ -85,9 +86,14 @@ public class MeshGeneration : EditorWindow {
         SmoothForegroundEdges = EditorGUILayout.Toggle("Smooth Foreground Edges", SmoothForegroundEdges);
         GenerateInpaintedRegion = EditorGUILayout.Toggle("Fill Occluded Regions", GenerateInpaintedRegion);
         GenerateOutpaintedRegion = EditorGUILayout.Toggle("Extend Mesh Outwards", GenerateOutpaintedRegion);
-        PerformMeshSimplification = EditorGUILayout.Toggle("Simplify Mesh", PerformMeshSimplification);
-        // For making tooltips
-        // new GUIContent("Test Float", "Here is a tooltip")
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Mesh Simplification Options");
+            GUILayout.BeginVertical("GroupBox");
+                PerformMeshSimplification = EditorGUILayout.Toggle("Simplify Mesh", PerformMeshSimplification);
+                LargestSimplifiedRegionSize = EditorGUILayout.IntSlider("Largest Region Size", LargestSimplifiedRegionSize, 128, 1024);
+                MaximumDeltaDistance = EditorGUILayout.Slider("Maximum Delta Distance", MaximumDeltaDistance, 0, 0.1f);
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
 
         if(GUILayout.Button("Generate 3D Photo")) {
             this.StartCoroutine(Generate3DPhotoV4(ColorImage, DepthImage, ForegroundImage));
@@ -492,7 +498,8 @@ public class MeshGeneration : EditorWindow {
         int xMidpoint = (x1 + x2) / 2;
         int yMidPoint = (y1 + y2) / 2;
         Vector2 bounds = ComputeRegionBounds(x1, x2, y1, y2, distances, width, regionBoundsCache);
-        if ((bounds.y - bounds.x) < 0.01f && regionArea < MinimumMeshDensity) {
+        int largestRegionArea = LargestSimplifiedRegionSize * LargestSimplifiedRegionSize;
+        if ((bounds.y - bounds.x) < MaximumDeltaDistance && regionArea < largestRegionArea) {
             // Simplify the region into two triangles.
             // Only add the corner vertices back (if they haven't been added already)
             int vertAIdx = y1 * width + x1;
@@ -714,8 +721,8 @@ public class MeshGeneration : EditorWindow {
         // which can cause seams between the hallucinated regions and the background.
         // - Mesh simplification needs to weld the hallucinated region to the original background, and this is a lot simpler if they are one mesh.
         int extendedBgTextureSize = Mathf.Max(ToNextNearestPowerOf2(width), ToNextNearestPowerOf2(height));
-        int extendedBgWidth = extendedBgTextureSize; // TODO: +1?
-        int extendedBgHeight = extendedBgTextureSize; // TODO: +1?
+        int extendedBgWidth = extendedBgTextureSize; // Technically this should be +1 but that makes the color indexing off by 1 and it's kind of a pain
+        int extendedBgHeight = extendedBgTextureSize; // Technically this should be +1 but that makes the color indexing off by 1 and it's kind of a pain
         if (!GenerateOutpaintedRegion) {
             extendedBgWidth = width;
             extendedBgHeight = height;
@@ -848,7 +855,8 @@ public class MeshGeneration : EditorWindow {
         File.WriteAllBytes("Assets/background.png", extendedBgTexture.EncodeToPNG());
         extendedBgTexture.LoadImage(System.IO.File.ReadAllBytes("Assets/background.png"));
 
-        // Form the triangles
+        // Form the triangles.
+        // Because the background mesh and hallucinated mesh regions are combined, it makes this logic quite simple.
         for (int row = 1; row < extendedBgHeight; row++) {
             for (int col = 1; col < extendedBgWidth; col++) {
                 int newVertIdx = row * extendedBgWidth + col;
@@ -859,60 +867,19 @@ public class MeshGeneration : EditorWindow {
                 int vertC = newVertIdx - 1;
                 int vertD = newVertIdx;
 
-                // // If this is part of the original, need to check to see if we want to form triangles.
-                // // Otherwise just form triangles.
-                // if (row >= originalStartRow && row < originalEndRow && col >= originalStartColumn && col < originalEndColumn) {
-                //     int originalRow = row - originalStartRow;
-                //     int originalCol = col - originalStartColumn;
-                //     int originalVertIdx = originalRow * width + originalCol;
-
-                //     // Previous Row
-                //     int ogVertA = originalVertIdx - 1 - width;
-                //     int ogVertB = originalVertIdx - width;
-                //     // Current Row
-                //     int ogVertC = originalVertIdx - 1;
-                //     int ogVertD = originalVertIdx;
-
-                //     // If this vertex is a FG vert, or if any of its neighbors are FG verts, we'll need to form triangles.
-                //     bool hasFgVert = false;
-
-                //     // Check previous row
-                //     if (originalRow > 0) {
-                //         if (originalCol > 0) {
-                //             // Check previous column
-                //             if (!bgVertexMask[ogVertA]) { hasFgVert = true; }
-                //         }
-                //         if (!bgVertexMask[ogVertB]) { hasFgVert = true; }
-                //     }
-                //     // Check current Row
-                //     if (originalCol > 0) {
-                //         // Check previous column
-                //         if (!bgVertexMask[ogVertC]) { hasFgVert = true; }
-                //     }
-                //     if (!bgVertexMask[ogVertD]) { hasFgVert = true; }
-                    
-                //     // If there's no FG verts, just skip
-                //     if (!hasFgVert) {
-                //         continue;
-                //     }
-                // }
-
-                // TODO: Add option to generate separate mesh
                 // Triangle ABC -> CBA
-                extendedBgTriangles.Add(vertC);
-                extendedBgTriangles.Add(vertB);
-                extendedBgTriangles.Add(vertA);
+                if (extendedBgVertexMask[vertC] && extendedBgVertexMask[vertB] && extendedBgVertexMask[vertA]) {
+                    extendedBgTriangles.Add(vertC);
+                    extendedBgTriangles.Add(vertB);
+                    extendedBgTriangles.Add(vertA);
+                }
                 // Triangle BDC -> CDB
-                extendedBgTriangles.Add(vertC);
-                extendedBgTriangles.Add(vertD);
-                extendedBgTriangles.Add(vertB);
+                if (extendedBgVertexMask[vertC] && extendedBgVertexMask[vertD] && extendedBgVertexMask[vertB]) {
+                    extendedBgTriangles.Add(vertC);
+                    extendedBgTriangles.Add(vertD);
+                    extendedBgTriangles.Add(vertB);
+                }
             }
-        }
-
-        // Add the original background mesh triangles into the new element buffer.
-        // Need to update the triangles to make them point at the new correct vertices.
-        for (int i = 0; i < bgTriangles.Count; i ++) {
-            // extendedBgTriangles.Add(ConvertVertexCoordinates(bgTriangles[i], width, originalStartColumn, originalStartRow, extendedBgTextureSize));
         }
 
         // Simplify the foreground mesh and generate output
@@ -921,13 +888,13 @@ public class MeshGeneration : EditorWindow {
             SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified);
             GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
         } else {
-            GenerateMesh("Foreground",vertices, uvs, fgTriangles.ToArray(), extendedBgTexture, rootObj.transform);
+            GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
         }
 
         // Simplify the extended background mesh and generate output
         if (PerformMeshSimplification) {
             Vector3[] extBgVertsSimplified; Vector2[] extBgUvsSimplified; int[] extBgTrianglesSimplified;
-            SimplifyMeshV2(extendedBgVerts, extendedBgUVs, extendedBgTriangles.ToArray(), extendedBgVertexMask, true, extendedBgTextureSize, extendedBgTextureSize, out extBgVertsSimplified, out extBgUvsSimplified, out extBgTrianglesSimplified);
+            SimplifyMeshV2(extendedBgVerts, extendedBgUVs, extendedBgTriangles.ToArray(), extendedBgVertexMask, true, extendedBgWidth, extendedBgHeight, out extBgVertsSimplified, out extBgUvsSimplified, out extBgTrianglesSimplified);
             GenerateMesh("Background", extBgVertsSimplified, extBgUvsSimplified, extBgTrianglesSimplified, extendedBgTexture, rootObj.transform);
         } else {
             GenerateMesh("Background", extendedBgVerts.ToArray(), extendedBgUVs.ToArray(), extendedBgTriangles.ToArray(), extendedBgTexture, rootObj.transform);
