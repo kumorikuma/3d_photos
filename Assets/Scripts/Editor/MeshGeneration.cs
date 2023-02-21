@@ -227,7 +227,8 @@ public class MeshGeneration : EditorWindow {
         return filteredVerts;
     }
 
-    bool IsBorderVertex(int row, int col, int width, int height, bool[] isBg) {
+    // Determines if a foreground vertex is bordering a background vertex.
+    bool IsFgVertexOnBorder(int row, int col, int width, int height, bool[] isBg) {
         int vertIdx = row * width + col;
         // Check current Row
         if (col > 0 && isBg[vertIdx - 1]) { return true; } // Check previous column
@@ -265,7 +266,7 @@ public class MeshGeneration : EditorWindow {
                 List<float> zValues = new List<float>(filterWidth * filterWidth);
                 Vector3 vert = vertices[vertIdx];
                 // If this is a border vertex...
-                if (!IsBorderVertex(row, col, width, height, isBg)) {
+                if (!IsFgVertexOnBorder(row, col, width, height, isBg)) {
                     filteredVerts[vertIdx] = vertices[vertIdx];
                     continue;
                 }
@@ -280,7 +281,7 @@ public class MeshGeneration : EditorWindow {
                         else if (neighborCol >= width) { continue; }
                         int neighborVertIdx = neighborRow * width + neighborCol;
                         if (isBg[neighborVertIdx]) { continue; }
-                        if (!IsBorderVertex(neighborRow, neighborCol, width, height, isBg)) { continue; }
+                        if (!IsFgVertexOnBorder(neighborRow, neighborCol, width, height, isBg)) { continue; }
                         Vector3 sampledVertex = vertices[neighborVertIdx];
                         xValues.Add(sampledVertex.x);
                         yValues.Add(sampledVertex.y);
@@ -321,6 +322,7 @@ public class MeshGeneration : EditorWindow {
 
             Vector2 bounds = new Vector2(min, max);
             // If one of the distances is float.MaxValue, set min to be float.MinValue.
+            // This makes it so this region will not be simplified.
             if (bounds.y == float.MaxValue) {
                 bounds = new Vector2(float.MinValue, float.MaxValue);
             }
@@ -349,13 +351,20 @@ public class MeshGeneration : EditorWindow {
         Vector3[] vertices, Vector2[] uvs, int[] triangles, 
         bool[] vertexMask, bool vertexMaskFlag, // Filters out certain vertices from being used
         int width, int height, 
-        out Vector3[] _newVerts, out Vector2[] _newUvs, out int[] _newTriangles
+        out Vector3[] _newVerts, out Vector2[] _newUvs, out int[] _newTriangles,
+        bool shouldSkipBorderVertices = false // Do not perform simplification on foreground border vertices. Should not be used for background mesh.
     ) {
         // Compute distances.
         float[] distances = new float[width * height];
         for (int i = 0; i < distances.Length; i++) { distances[i] = float.MaxValue; } // Use float.MaxValue as a marker for this was not set
         for (int vertIdx = 0; vertIdx < vertices.Length; vertIdx++) {
-            if (vertexMaskFlag != vertexMask[vertIdx]) {
+            bool isBorderVertex = false;
+            if (shouldSkipBorderVertices) {
+                int col = vertIdx % width;
+                int row = (vertIdx - col) / width;
+                isBorderVertex = IsFgVertexOnBorder(row, col, width, height, vertexMask);
+            }
+            if (vertexMaskFlag != vertexMask[vertIdx] || isBorderVertex) {
                 continue;
             } else {
                 distances[vertIdx] = (Vector3.zero - vertices[vertIdx]).magnitude;
@@ -880,14 +889,14 @@ public class MeshGeneration : EditorWindow {
         }
 
         // Simplify the foreground mesh and generate output
-        // if (PerformMeshSimplification) {
-        //     Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
-        //     SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified);
-        //     GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
-        // } else {
-        //     GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
-        // }
-        GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
+        if (PerformMeshSimplification) {
+            Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
+            const bool SkipBorderVertices = true;
+            SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified, SkipBorderVertices);
+            GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
+        } else {
+            GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
+        }
 
         // Simplify the extended background mesh and generate output
         if (PerformMeshSimplification) {
