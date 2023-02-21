@@ -23,6 +23,7 @@ public class MeshGeneration : EditorWindow {
     bool PerformMeshSimplification = true;
     int LargestSimplifiedRegionSize = 512;
     float MaximumDeltaDistance = 0.01f;
+    int ForegroundFeathering = 3;
     
     // Field of view that the photo was taken in.
     // Viewing FOV actually doesn't matter.
@@ -83,6 +84,7 @@ public class MeshGeneration : EditorWindow {
         SmoothForegroundEdges = EditorGUILayout.Toggle("Smooth Foreground Edges", SmoothForegroundEdges);
         GenerateInpaintedRegion = EditorGUILayout.Toggle("Fill Occluded Regions", GenerateInpaintedRegion);
         GenerateOutpaintedRegion = EditorGUILayout.Toggle("Extend Mesh Outwards", GenerateOutpaintedRegion);
+        ForegroundFeathering = EditorGUILayout.IntSlider("Feather foreground edges (px)", ForegroundFeathering, 0, 10);
         GUILayout.BeginVertical("HelpBox");
             GUILayout.Label("Mesh Simplification Options");
             GUILayout.BeginVertical("GroupBox");
@@ -556,7 +558,7 @@ public class MeshGeneration : EditorWindow {
         }
     }
 
-    void GenerateMesh(string name, Vector3[] vertices, Vector2[] uvs, int[] triangles, Texture2D texture, Transform parent = null) {
+    void GenerateMesh(string name, Vector3[] vertices, Vector2[] uvs, int[] triangles, Texture2D texture, Transform parent = null, Material material = null) {
         GameObject meshObject = new GameObject(name);
         MeshFilter meshFilter = meshObject.AddComponent<MeshFilter>() as MeshFilter;
         MeshRenderer meshRenderer = meshObject.AddComponent<MeshRenderer>() as MeshRenderer;
@@ -568,10 +570,14 @@ public class MeshGeneration : EditorWindow {
         mesh.triangles = triangles;
         meshFilter.mesh = mesh;
 
-        // Add a material onto the mesh
-        Material mat = new Material(Shader.Find("Unlit/Texture"));
-        mat.SetTexture("_MainTex", texture);
-        meshRenderer.material = mat;
+        if (material == null) {
+            // Add a material onto the mesh
+            Material mat = new Material(Shader.Find("Unlit/Texture"));
+            mat.SetTexture("_MainTex", texture);
+            meshRenderer.material = mat;
+        } else {
+            meshRenderer.material = material;
+        }
 
         if (parent != null) {
             meshObject.transform.SetParent(parent);
@@ -593,13 +599,14 @@ public class MeshGeneration : EditorWindow {
         Texture2D colorImage = GetReadableTexture(_colorImage, false);
         Color32[] depthPixels = depthImage.GetPixels32(0);
         Color32[] fgPixels = fgImage.GetPixels32(0);
+        Color32[] colorImagePixels = colorImage.GetPixels32(0);
 
         GameObject rootObj = new GameObject("3D Photo");
 
         // For each pixel, we'll have four vertices, one for each corner.
         // Then we will form two triangles covering the square that is the pixel.
         // Total number of vertices on each side is equal to pixels + 1.
-        // TODO: Insert image here
+        // Diagram: https://github.com/kumorikuma/3d_photos/blob/main/Assets/Diagrams/vertex_layout.jpg
         int width = depthImage.width + 1;
         int height = depthImage.height + 1;
         int numVerts = width * height;
@@ -653,7 +660,6 @@ public class MeshGeneration : EditorWindow {
         }
        
         // Generate triangles. We only generate triangles in pairs to ensure there are only quads in our topology.
-        // TODO: Insert image here
         // The quad has:
         // - Top left corner A
         // - Top right corner B
@@ -738,13 +744,13 @@ public class MeshGeneration : EditorWindow {
         Vector3[] extendedBgVerts = new Vector3[numVertsForExtendedBg];
         Vector2[] extendedBgUVs = new Vector2[numVertsForExtendedBg];
         bool[] extendedBgVertexMask = new bool[numVertsForExtendedBg];
+        bool[] hallucinatedMeshVertexMask = new bool[numVertsForExtendedBg];
         List<int> extendedBgTriangles = new List<int>();
 
         // Make a new texture that uses alpha = 0 for the empty spots. Goal is to infill those spots using DallE.
         // We'll also do outpainting. The output texture will be square.
         Texture2D extendedBgTexture = new Texture2D(extendedBgWidth, extendedBgHeight);
         Color[] colors = new Color[extendedBgWidth * extendedBgHeight];
-        Color32[] colorImagePixels = colorImage.GetPixels32(0);
 
         // Center the original image inside of the larger square
         int originalStartRow = (int)((extendedBgHeight - height) / 2.0f);
@@ -817,6 +823,7 @@ public class MeshGeneration : EditorWindow {
                     extendedBgVerts[newVertIdx] = hallucinatedVert;
                     extendedBgUVs[newVertIdx] = uv;
                     extendedBgVertexMask[newVertIdx] = true;
+                    hallucinatedMeshVertexMask[newVertIdx] = true;
                 } else { // This needs to be outpainted
                     colors[newVertIdx] = new Color(0, 0, 0, 0);
 
@@ -852,6 +859,7 @@ public class MeshGeneration : EditorWindow {
                     extendedBgVerts[newVertIdx] = hallucinatedVert;
                     extendedBgUVs[newVertIdx] = uv;
                     extendedBgVertexMask[newVertIdx] = true;
+                    hallucinatedMeshVertexMask[newVertIdx] = true;
                 }    
             }
         }
@@ -888,14 +896,23 @@ public class MeshGeneration : EditorWindow {
             }
         }
 
+        // Use a separate material for the foreground mesh that feathers the edges.
+        Texture2D featherTexture = GenerateFeatherMask(width, height, bgVertexMask);
+        Material fgMat = null;
+        if (ForegroundFeathering > 0) {
+            fgMat = new Material(Shader.Find("Unlit/FeatherShader"));
+            fgMat.SetTexture("_MainTex", colorImage);
+            fgMat.SetTexture("_FeatherTex", featherTexture);
+        }
+
         // Simplify the foreground mesh and generate output
         if (PerformMeshSimplification) {
             Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
             const bool SkipBorderVertices = true;
             SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified, SkipBorderVertices);
-            GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform);
+            GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform, fgMat);
         } else {
-            GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform);
+            GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform, fgMat);
         }
 
         // Simplify the extended background mesh and generate output
@@ -908,6 +925,59 @@ public class MeshGeneration : EditorWindow {
         }
 
         yield return null;
+    }
+
+    Texture2D GenerateFeatherMask(int width, int height, bool[] bgVertexMask) {
+        // Create a texture that represents distance from nearest inpainted region
+        Texture2D featherMask = new Texture2D(width, height);
+        Color[] featherMaskColors = new Color[width * height];
+        int filterRadius = 3;
+        int filterSize = filterRadius * 2 + 1;
+        float maxDistance = filterRadius;
+        for (int row = 0; row < height; row++) {
+            for (int col = 0; col < width; col++) {
+                int idx = row * width + col;
+                // If it's background region, then fill with black.
+                if (bgVertexMask[idx]) {
+                    featherMaskColors[idx] = Color.black;
+                    continue;
+                }
+
+                // Get distance to background region
+                float minDistance = float.MaxValue;
+                Vector2 coordinate = new Vector2(col, row);
+                for (int j = -filterRadius; j <= filterRadius; j++) {
+                    for (int i = -filterRadius; i <= filterRadius; i++) {
+                        if (j == 0 && i == 0) { continue; } // Skip self
+                        int neighborRow = row + j;
+                        if (neighborRow < 0) { continue; }
+                        else if (neighborRow >= height) { continue; }
+                        int neighborCol = col + i;
+                        if (neighborCol < 0) { continue; }
+                        else if (neighborCol >= width) { continue; }
+
+                        int neighborVertIdx = neighborRow * width + neighborCol;
+                        if (bgVertexMask[neighborVertIdx]) {
+                            // Compute distance to it
+                            float distance = (new Vector2(neighborCol, neighborRow) - coordinate).magnitude;
+                            if (distance < minDistance) {
+                                minDistance = distance;
+                            }
+                        }
+                    }
+                }
+                if (minDistance == float.MaxValue) {
+                    featherMaskColors[idx] = Color.white;
+                } else {
+                    float t = minDistance / filterRadius;
+                    featherMaskColors[idx] = Color.Lerp(Color.black, Color.white, t);
+                }
+            }
+        }
+        featherMask.SetPixels(featherMaskColors);
+        File.WriteAllBytes("Assets/feather_mask.png", featherMask.EncodeToPNG());
+        featherMask.LoadImage(System.IO.File.ReadAllBytes("Assets/feather_mask.png"));
+        return featherMask;
     }
 
     // V3
