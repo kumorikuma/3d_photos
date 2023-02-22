@@ -47,6 +47,8 @@ public class SceneCameraControls : EditorWindow {
     }
  
     void OnEnable() {
+        camera = Camera.main;
+        pivot = GameObject.Find("Pivot");
         // cache any data you need here.
         // if you want to persist values used in the inspector, you can use eg. EditorPrefs
         if (camera) {
