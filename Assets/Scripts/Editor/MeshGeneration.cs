@@ -18,12 +18,16 @@ public class MeshGeneration : EditorWindow {
     bool SmoothForegroundEdges = true;
     bool ProjectFromOrigin = true;
     bool ConvertDepthValuesFromDisparity = true;
+    bool GenerateForegroundMesh = true;
+    bool GenerateBackgroundMesh = true;
     bool GenerateInpaintedRegion = true;
     bool GenerateOutpaintedRegion = true;
     bool PerformMeshSimplification = true;
-    int LargestSimplifiedRegionSize = 512;
-    float MaximumDeltaDistance = 0.01f;
-    int ForegroundFeathering = 3;
+    int LargestSimplifiedRegionSize = 256;
+    float MaximumDeltaDistance = 0.025f;
+    bool ForegroundFeathering = true;
+    float MaxDepth = 1;
+    string PhotoIdentifier = "";
     
     // Field of view that the photo was taken in.
     // Viewing FOV actually doesn't matter.
@@ -39,9 +43,9 @@ public class MeshGeneration : EditorWindow {
         // cache any data you need here.
         // if you want to persist values used in the inspector, you can use eg. EditorPrefs
         if (ColorImage == null && DepthImage == null && ForegroundImage == null) {
-            ColorImage.LoadImage(System.IO.File.ReadAllBytes("Assets/shiba.jpg"));
-            DepthImage.LoadImage(System.IO.File.ReadAllBytes("Assets/shiba_depth.jpg"));
-            ForegroundImage.LoadImage(System.IO.File.ReadAllBytes("Assets/shiba_foreground.PNG"));
+            ColorImage.LoadImage(System.IO.File.ReadAllBytes("Assets/Images/shiba.jpg"));
+            DepthImage.LoadImage(System.IO.File.ReadAllBytes("Assets/Images/shiba_depth.jpg"));
+            ForegroundImage.LoadImage(System.IO.File.ReadAllBytes("Assets/Images/shiba_foreground.PNG"));
         }
     }
  
@@ -79,12 +83,20 @@ public class MeshGeneration : EditorWindow {
         cameraVerticalFov = EditorGUILayout.Slider("Camera Vertical FOV", cameraVerticalFov, 30.0f, 120.0f);
         ProjectFromOrigin = EditorGUILayout.Toggle("Project Mesh from Origin", ProjectFromOrigin);
         ConvertDepthValuesFromDisparity = EditorGUILayout.Toggle("Depth stored as Disparity", ConvertDepthValuesFromDisparity);
+        MaxDepth = EditorGUILayout.Slider("Foreground Flatness", MaxDepth, 1, 20);
         RunMedianFilter = EditorGUILayout.Toggle("Remove Outliers", RunMedianFilter);
         RunMeshSmoothingFilter = EditorGUILayout.Toggle("Smooth Mesh", RunMeshSmoothingFilter);
         SmoothForegroundEdges = EditorGUILayout.Toggle("Smooth Foreground Edges", SmoothForegroundEdges);
-        GenerateInpaintedRegion = EditorGUILayout.Toggle("Fill Occluded Regions", GenerateInpaintedRegion);
-        GenerateOutpaintedRegion = EditorGUILayout.Toggle("Extend Mesh Outwards", GenerateOutpaintedRegion);
-        ForegroundFeathering = EditorGUILayout.IntSlider("Feather foreground edges (px)", ForegroundFeathering, 0, 10);
+        ForegroundFeathering = EditorGUILayout.Toggle("Feather Foreground Edges", ForegroundFeathering);
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Mesh Generation Options");
+            GUILayout.BeginVertical("GroupBox");
+                GenerateForegroundMesh = EditorGUILayout.Toggle("Generate Foreground", GenerateForegroundMesh);
+                GenerateBackgroundMesh = EditorGUILayout.Toggle("Generate Background", GenerateBackgroundMesh);
+                GenerateInpaintedRegion = EditorGUILayout.Toggle("Fill Occluded Regions", GenerateInpaintedRegion);
+                GenerateOutpaintedRegion = EditorGUILayout.Toggle("Extend Mesh Outwards", GenerateOutpaintedRegion);
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
         GUILayout.BeginVertical("HelpBox");
             GUILayout.Label("Mesh Simplification Options");
             GUILayout.BeginVertical("GroupBox");
@@ -177,7 +189,65 @@ public class MeshGeneration : EditorWindow {
         return new Color(r, g, b, a);
     }
 
-    Vector3[] FilterVertices(Vector3[] vertices, bool[] isBg, int width, int height, int filterRadius = 4, bool useMedianInsteadOfAverage = false) {
+Color[] FilterImage(Color32[] image, int width, int height, bool[]? mask = null, bool invertMask = false, int filterRadius = 4, bool useMedianInsteadOfAverage = false) {
+    int filterWidth = filterRadius * 2 + 1;
+    Color[] filteredColors = new Color[image.Length];
+    for (int row = 0; row < height; row++) {
+        for (int col = 0; col < width; col++) {
+            int idx = row * width + col;
+            // Mask out pixels
+            if (mask != null && ((!mask[idx] && !invertMask) || (mask[idx] && invertMask))) {
+                filteredColors[idx] = image[idx];
+                continue;
+            }
+            List<float> rValues = new List<float>(filterWidth * filterWidth);
+            List<float> gValues = new List<float>(filterWidth * filterWidth);
+            List<float> bValues = new List<float>(filterWidth * filterWidth);
+            List<float> aValues = new List<float>(filterWidth * filterWidth);
+            for (int j = -filterRadius; j < filterRadius; j++) {
+                for (int i = -filterRadius; i < filterRadius; i++) {
+                    int neighborRow = row + j;
+                    if (neighborRow < 0) { 
+                        neighborRow = 0;
+                    }
+                    else if (neighborRow >= height) { 
+                        neighborRow = height - 1;
+                    }
+                    int neighborCol = col + i;
+                    if (neighborCol < 0) { 
+                        neighborCol = 0;
+                    }
+                    else if (neighborCol >= width) { 
+                        neighborCol = width - 1;
+                    }
+                    // Mask out pixels
+                    int neighborIdx = neighborRow * width + neighborCol;
+                    if (mask != null && ((!mask[neighborIdx] && !invertMask) || (mask[neighborIdx] && invertMask))) {
+                        neighborCol = col;
+                        neighborRow = row;
+                    }
+                    Color32 sampledColor = image[neighborIdx];
+                    rValues.Add(sampledColor.r / 255.0f);
+                    gValues.Add(sampledColor.g / 255.0f);
+                    bValues.Add(sampledColor.b / 255.0f);
+                    // aValues.Add(sampledColor.a / 255.0f);
+                }
+            }
+            // filteredColors[idx] = Color.red;
+            if (useMedianInsteadOfAverage) {
+                rValues.Sort();
+                gValues.Sort();
+                bValues.Sort();
+                filteredColors[idx] = new Color(rValues[rValues.Count / 2], gValues[gValues.Count / 2], bValues[bValues.Count / 2], 1);
+            } else {
+                filteredColors[idx] = new Color(rValues.Average(), gValues.Average(), bValues.Average(), 1);
+            }
+        }
+    }
+    return filteredColors;
+}
+
+    Vector3[] FilterVertices(Vector3[] vertices, bool[] vertexMask, bool invertMask, int width, int height, int filterRadius = 4, bool useMedianInsteadOfAverage = false) {
         int filterWidth = filterRadius * 2 + 1;
         Vector3[] filteredVerts = new Vector3[vertices.Length];
         for (int row = 0; row < height; row++) {
@@ -185,7 +255,11 @@ public class MeshGeneration : EditorWindow {
                 int vertIdx = row * width + col;
                 List<float> distances = new List<float>(filterWidth * filterWidth);
                 Vector3 vertex = vertices[vertIdx];
-                bool isVertBg = isBg[vertIdx];
+                if ((!vertexMask[vertIdx] && !invertMask) || (vertexMask[vertIdx] && invertMask)) { 
+                    // Don't do any filtering
+                    filteredVerts[vertIdx] = vertices[vertIdx];
+                    continue;
+                }
                 // Compute Centroid
                 for (int j = -filterRadius; j <= filterRadius; j++) {
                     for (int i = -filterRadius; i <= filterRadius; i++) {
@@ -209,8 +283,7 @@ public class MeshGeneration : EditorWindow {
                             continue;
                         }
                         int neighborVertIdx = neighborRow * width + neighborCol;
-                        bool isSampledVertBg = isBg[neighborVertIdx];
-                        if (isVertBg != isSampledVertBg) { 
+                        if ((!vertexMask[neighborVertIdx] && !invertMask) || (vertexMask[neighborVertIdx] && invertMask)) { 
                             neighborVertIdx = vertIdx;
                             continue;
                         }
@@ -252,8 +325,7 @@ public class MeshGeneration : EditorWindow {
         return false;
     }
 
-    Vector3[] FilterFgBorderVertices(Vector3[] vertices, bool[] isBg, int width, int height) {
-        int filterRadius = 1;
+    Vector3[] FilterFgBorderVertices(Vector3[] vertices, bool[] isBg, int width, int height, int filterRadius = 1, bool useMedianInsteadOfAverage = false) {
         int filterWidth = filterRadius * 2 + 1;
         Vector3[] filteredVerts = new Vector3[vertices.Length];
         for (int row = 0; row < height; row++) {
@@ -291,7 +363,15 @@ public class MeshGeneration : EditorWindow {
                     }
                 }
 
-                Vector3 centroid = new Vector3(xValues.Average(), yValues.Average(), zValues.Average());
+                Vector3 centroid;
+                if (useMedianInsteadOfAverage) {
+                    xValues.Sort();
+                    yValues.Sort();
+                    zValues.Sort();
+                    centroid = new Vector3(xValues[xValues.Count / 2], yValues[yValues.Count / 2], zValues[zValues.Count / 2]);
+                } else {
+                    centroid = new Vector3(xValues.Average(), yValues.Average(), zValues.Average());
+                }
                 filteredVerts[vertIdx] = centroid;
             }
         }
@@ -469,10 +549,26 @@ public class MeshGeneration : EditorWindow {
             }
         }
 
-        _newVerts = newVertices.ToArray();
-        _newUvs = newUvs.ToArray();
+        // Cull any un-used vertices.
+        // TODO: It's unclear why there are so many extra verts...
+        int[] vertConversionIdxMap = new int[newVertices.Count];
+        for (int i = 0; i < vertConversionIdxMap.Length; i++) { vertConversionIdxMap[i] = -1; }
+        List<Vector3> reducedVerts = new List<Vector3>();
+        List<Vector2> reducedUvs = new List<Vector2>();
+        for (int i = 0; i < newTriangles.Count; i++) {
+            if (vertConversionIdxMap[newTriangles[i]] < 0) {
+                vertConversionIdxMap[newTriangles[i]] = reducedVerts.Count;
+                reducedVerts.Add(newVertices[newTriangles[i]]);
+                reducedUvs.Add(newUvs[newTriangles[i]]);
+            }
+        }
+        for (int i = 0; i < newTriangles.Count; i++) {
+            newTriangles[i] = vertConversionIdxMap[newTriangles[i]];
+        }
+
+        _newVerts = reducedVerts.ToArray();
+        _newUvs = reducedUvs.ToArray();
         _newTriangles = newTriangles.ToArray();
-        Debug.Log("Simplified tris count: " + _newTriangles.Length);
     }
 
     void SimplifyMeshRegion(
@@ -574,6 +670,7 @@ public class MeshGeneration : EditorWindow {
             // Add a material onto the mesh
             Material mat = new Material(Shader.Find("Unlit/Texture"));
             mat.SetTexture("_MainTex", texture);
+            AssetDatabase.CreateAsset(mat, "Assets/Resources/"+PhotoIdentifier+"_bgMaterial.mat");
             meshRenderer.material = mat;
         } else {
             meshRenderer.material = material;
@@ -592,9 +689,11 @@ public class MeshGeneration : EditorWindow {
     }
 
     IEnumerator Generate3DPhotoV4(Texture2D _colorImage, Texture2D _depthImage, Texture2D _foregroundImage) {
+        PhotoIdentifier = System.Guid.NewGuid().ToString();
+
         // When importing a texture, "Read/Write" is disabled.
         // This creates a copy of the texture that has read enabled.
-        Texture2D depthImage = GetReadableTexture(_depthImage);
+        Texture2D depthImage = GetReadableTexture(_depthImage, true);
         Texture2D fgImage = GetReadableTexture(_foregroundImage, false);
         Texture2D colorImage = GetReadableTexture(_colorImage, false);
         Color32[] depthPixels = depthImage.GetPixels32(0);
@@ -612,12 +711,24 @@ public class MeshGeneration : EditorWindow {
         int numVerts = width * height;
         Vector3[] vertices = new Vector3[numVerts];
         Vector2[] uvs = new Vector2[numVerts];
+        List<float> distances = new List<float>(numVerts);
 
         // We're going to re-use this same vertex buffer for different meshes,
         // so we will also establish a vertexMask to mark which ones to use.
         bool[] bgVertexMask = new bool[numVerts]; // fgVertexMask is just the opposite of this
         List<int> bgTriangles = new List<int>(); // # of tris is variable
         List<int> fgTriangles = new List<int>(); // # of tris is variable
+
+        // First construct a mask of all the background vertices.
+        bool[] bgPxMask = new bool[depthImage.width * depthImage.height]; // fgVertexMask is just the opposite of this
+        for (int row = 0; row < depthImage.height; row++) {
+            for (int col = 0; col < depthImage.width; col++) {
+                int idx = row * depthImage.width + col;
+                Vector2 uv = new Vector2(col / (float)(depthImage.width), row / (float)(depthImage.height)); // Range [0, 1]
+                bool isBackground = SampleTexture(uv, fgPixels, fgImage.width, fgImage.height).a < 0.01f;
+                bgPxMask[idx] = isBackground;
+            }
+        }
 
         // Create vertices
         for (int row = 0; row < height; row++) {
@@ -634,7 +745,7 @@ public class MeshGeneration : EditorWindow {
                     // Apply a conversion from disparity depth to actual z value
                     // Change in foreground has little effect. Change in background has a lot of effect.
                     // As a result, need to apply distance thresholding.
-                    float maxDepth = 1;
+                    float maxDepth = MaxDepth; // This value affects how much difference there is between fg and bg, or how much 'depth' there is in the scene.
                     depth = 1 / (disparityDepth + (1 / maxDepth)); // Range [0.5, maxDepth]
                     depth = (depth - 0.5f) / (maxDepth - 0.5f); // Range [0.0, 1.0]
                 }
@@ -659,6 +770,32 @@ public class MeshGeneration : EditorWindow {
             }
         }
        
+        // Outlier removal for BG: if distance value is less than 90% of other values, or average, then set it to the average.
+        if (RunMedianFilter) {
+            List<Vector3> bgVertices = new List<Vector3>();
+            for (int i = 0; i < vertices.Length; i++) {
+                if (bgVertexMask[i]) { bgVertices.Add(vertices[i]); }
+            }
+            bgVertices.Sort((Vector3 A, Vector3 B) => {
+                float distanceA = (A - Vector3.zero).magnitude;
+                float distanceB = (B - Vector3.zero).magnitude;
+                return distanceB.CompareTo(distanceA); // Descending order
+            });
+            float distanceThreshold = (bgVertices[(int)(bgVertices.Count * 0.9f)] - Vector3.zero).magnitude;
+            for (int row = 0; row < height; row++) {
+                for (int col = 0; col < width; col++) {
+                    int vertIdx = row * width + col;
+                    if (!bgVertexMask[vertIdx]) { continue; }
+                    // Reproject the vertex
+                    float distance = (vertices[vertIdx] - Vector3.zero).magnitude;
+                    if (distance < distanceThreshold) {
+                        vertices[vertIdx] = vertices[vertIdx].normalized * distanceThreshold;
+                    }
+                }
+            }
+        }
+        
+
         // Generate triangles. We only generate triangles in pairs to ensure there are only quads in our topology.
         // The quad has:
         // - Top left corner A
@@ -702,20 +839,19 @@ public class MeshGeneration : EditorWindow {
             }
         }
 
-        Debug.Log("Total Vertex count: " + numVerts);
-        Debug.Log("Triangle count in background mesh: " + bgTriangles.Count);
-        Debug.Log("Triangle count in foreground mesh: " + fgTriangles.Count);
-
         // Resulting mesh ends up having a lot of imperfections which can be mitigated using filters.
         // This is by far the slowest part of the algorithm.
         // Use border behavior: clamp.
         if (RunMedianFilter) {
-            // First run a median filter to remove any outliers
-            vertices = FilterVertices(vertices, bgVertexMask, width, height, 4, true);
+            // Run a median filter to remove any outliers
+            vertices = FilterVertices(vertices, bgVertexMask, false, width, height, 4, true); // Background
+            vertices = FilterVertices(vertices, bgVertexMask, true, width, height, 8, true); // Foreground
+            vertices = FilterVertices(vertices, bgVertexMask, true, width, height, 8, true); // Foreground
         }
         if (RunMeshSmoothingFilter) {
             // Then run an averaging (or blurring) filter to smooth out the mesh
-            vertices = FilterVertices(vertices, bgVertexMask, width, height); // Average
+            vertices = FilterVertices(vertices, bgVertexMask, false, width, height, 8); // Background
+            vertices = FilterVertices(vertices, bgVertexMask, true, width, height, 8); // Foreground
         }
         if (SmoothForegroundEdges) {
             // The edges in the foreground can be very jagged. 
@@ -732,9 +868,13 @@ public class MeshGeneration : EditorWindow {
         // - The original background should use the same texture as the hallucinated mesh. Dall-E changes the original image pixels slightly when inpainting,
         // which can cause seams between the hallucinated regions and the background.
         // - Mesh simplification needs to weld the hallucinated region to the original background, and this is a lot simpler if they are one mesh.
-        int extendedBgTextureSize = Mathf.Max(ToNextNearestPowerOf2(width), ToNextNearestPowerOf2(height));
-        int extendedBgWidth = extendedBgTextureSize; // Technically this should be +1 but that makes the color indexing off by 1 and it's kind of a pain
-        int extendedBgHeight = extendedBgTextureSize; // Technically this should be +1 but that makes the color indexing off by 1 and it's kind of a pain
+        int paddingWidth = (int)(0.1f * width);
+        int paddingHeight = (int)(0.1f * height);
+        int extendedBgWidth = width + paddingWidth;
+        int extendedBgHeight = height + paddingHeight;
+        int extendedBgTextureSize = Mathf.Max(extendedBgWidth, extendedBgHeight);
+        extendedBgWidth = extendedBgTextureSize; // Technically this should be +1 but that makes the color indexing off by 1 and it's kind of a pain
+        extendedBgHeight = extendedBgTextureSize; // Technically this should be +1 but that makes the color indexing off by 1 and it's kind of a pain
         if (!GenerateOutpaintedRegion) {
             extendedBgWidth = width;
             extendedBgHeight = height;
@@ -836,7 +976,9 @@ public class MeshGeneration : EditorWindow {
                     if (neighborRow < originalStartRow) { neighborRow = originalStartRow; }
                     else if (neighborRow >= originalEndRow) { neighborRow = originalEndRow - 1; }
                     neighborRow = neighborRow - originalStartRow;
-                    float distanceFromOrigin = (vertices[neighborRow * width + neighborCol] - Vector3.zero).magnitude;
+                    int neighborIdx = neighborRow * width + neighborCol;
+                    float distanceFromOrigin = (vertices[neighborIdx] - Vector3.zero).magnitude;
+                    // TODO: If it's a foreground vertex, probably do something different
 
                     // Expand the FOV outside of the original FOV
                     float degreesPerPixelHFov = cameraHorizontalFov / width;
@@ -864,10 +1006,17 @@ public class MeshGeneration : EditorWindow {
             }
         }
 
-        // Save texture to disk to allow inpainting with third party tool
+        // Save texture to disk to allow inpainting with third party tool.
+        // Dall-E's max resolution is 1024x1024, so resize it if it's bigger.
+        
         extendedBgTexture.SetPixels(colors);
-        File.WriteAllBytes("Assets/background.png", extendedBgTexture.EncodeToPNG());
-        extendedBgTexture.LoadImage(System.IO.File.ReadAllBytes("Assets/background.png"));
+        if (extendedBgTextureSize != 1024) {
+            GPUTextureScaler.Scale(extendedBgTexture, 1024, 1024);
+        }
+        string filename = "Assets/Resources/"+PhotoIdentifier+"_extendedBgTexture.png";
+        File.WriteAllBytes(filename, extendedBgTexture.EncodeToPNG());
+        AssetDatabase.ImportAsset(filename);
+        extendedBgTexture = Resources.Load<Texture2D>(PhotoIdentifier+"_extendedBgTexture");
 
         // Form the triangles.
         // Because the background mesh and hallucinated mesh regions are combined, it makes this logic quite simple.
@@ -897,37 +1046,52 @@ public class MeshGeneration : EditorWindow {
         }
 
         // Use a separate material for the foreground mesh that feathers the edges.
-        Texture2D featherTexture = GenerateFeatherMask(width, height, bgVertexMask);
+        // Texture2D featherTexture = GenerateFeatherMask(1024, 1024, fgPixels, fgImage.width, fgImage.height);
+        // featherTexture.SetPixels(FilterImage(featherTexture.GetPixels32(), featherTexture.width, featherTexture.height, null, false, 8));
         Material fgMat = null;
-        if (ForegroundFeathering > 0) {
+        if (ForegroundFeathering) {
             fgMat = new Material(Shader.Find("Unlit/FeatherShader"));
-            fgMat.SetTexture("_MainTex", colorImage);
-            fgMat.SetTexture("_FeatherTex", featherTexture);
+            fgMat.SetTexture("_MainTex", _colorImage);
+            fgMat.SetTexture("_FeatherTex", _foregroundImage);
+            fgMat.renderQueue = 3000; // For transparency
+            AssetDatabase.CreateAsset(fgMat, "Assets/Resources/"+PhotoIdentifier+"_fgMaterial.mat");
         }
 
         // Simplify the foreground mesh and generate output
-        if (PerformMeshSimplification) {
-            Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
-            const bool SkipBorderVertices = true;
-            SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified, SkipBorderVertices);
-            GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, colorImage, rootObj.transform, fgMat);
-        } else {
-            GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), colorImage, rootObj.transform, fgMat);
+        if (GenerateForegroundMesh) {
+            if (PerformMeshSimplification) {
+                Vector3[] fgVertsSimplified; Vector2[] fgUvsSimplified; int[] fgTrianglesSimplified;
+                const bool SkipBorderVertices = true;
+                SimplifyMeshV2(vertices, uvs, fgTriangles.ToArray(), bgVertexMask, false, width, height, out fgVertsSimplified, out fgUvsSimplified, out fgTrianglesSimplified, SkipBorderVertices);
+                GenerateMesh("Foreground", fgVertsSimplified, fgUvsSimplified, fgTrianglesSimplified, _colorImage, rootObj.transform, fgMat);
+                Debug.Log("Foreground Mesh Vert #: " + fgVertsSimplified.Length);
+                Debug.Log("Foreground Mesh Tri #: " + fgTrianglesSimplified.Length);
+            } else {
+                GenerateMesh("Foreground", vertices, uvs, fgTriangles.ToArray(), _colorImage, rootObj.transform, fgMat);
+                Debug.Log("Foreground Mesh Vert #: " + vertices.Length);
+                Debug.Log("Foreground Mesh Tri #: " + fgTriangles.Count);
+            }
         }
 
         // Simplify the extended background mesh and generate output
-        if (PerformMeshSimplification) {
-            Vector3[] extBgVertsSimplified; Vector2[] extBgUvsSimplified; int[] extBgTrianglesSimplified;
-            SimplifyMeshV2(extendedBgVerts, extendedBgUVs, extendedBgTriangles.ToArray(), extendedBgVertexMask, true, extendedBgWidth, extendedBgHeight, out extBgVertsSimplified, out extBgUvsSimplified, out extBgTrianglesSimplified);
-            GenerateMesh("Background", extBgVertsSimplified, extBgUvsSimplified, extBgTrianglesSimplified, extendedBgTexture, rootObj.transform);
-        } else {
-            GenerateMesh("Background", extendedBgVerts.ToArray(), extendedBgUVs.ToArray(), extendedBgTriangles.ToArray(), extendedBgTexture, rootObj.transform);
+        if (GenerateBackgroundMesh) {
+            if (PerformMeshSimplification) {
+                Vector3[] extBgVertsSimplified; Vector2[] extBgUvsSimplified; int[] extBgTrianglesSimplified;
+                SimplifyMeshV2(extendedBgVerts, extendedBgUVs, extendedBgTriangles.ToArray(), extendedBgVertexMask, true, extendedBgWidth, extendedBgHeight, out extBgVertsSimplified, out extBgUvsSimplified, out extBgTrianglesSimplified);
+                GenerateMesh("Background", extBgVertsSimplified, extBgUvsSimplified, extBgTrianglesSimplified, extendedBgTexture, rootObj.transform);
+                Debug.Log("Background Mesh Vert #: " + extBgVertsSimplified.Length);
+                Debug.Log("Background Mesh Tri #: " + extBgTrianglesSimplified.Length);
+            } else {
+                GenerateMesh("Background", extendedBgVerts, extendedBgUVs, extendedBgTriangles.ToArray(), extendedBgTexture, rootObj.transform);
+                Debug.Log("Foreground Mesh Vert #: " + extendedBgVerts.Length);
+                Debug.Log("Foreground Mesh Tri #: " + extendedBgTriangles.Count);
+            }
         }
 
         yield return null;
     }
 
-    Texture2D GenerateFeatherMask(int width, int height, bool[] bgVertexMask) {
+    Texture2D GenerateFeatherMask(int width, int height, Color32[] fgPixels, int fgWidth, int fgHeight) {
         // Create a texture that represents distance from nearest inpainted region
         Texture2D featherMask = new Texture2D(width, height);
         Color[] featherMaskColors = new Color[width * height];
@@ -938,7 +1102,8 @@ public class MeshGeneration : EditorWindow {
             for (int col = 0; col < width; col++) {
                 int idx = row * width + col;
                 // If it's background region, then fill with black.
-                if (bgVertexMask[idx]) {
+                Vector2 uv = new Vector2(col / (float)(width), row / (float)(height)); // Range [0, 1]
+                if (SampleTexture(uv, fgPixels, fgWidth, fgHeight).a < 0.01f) {
                     featherMaskColors[idx] = Color.black;
                     continue;
                 }
@@ -956,8 +1121,8 @@ public class MeshGeneration : EditorWindow {
                         if (neighborCol < 0) { continue; }
                         else if (neighborCol >= width) { continue; }
 
-                        int neighborVertIdx = neighborRow * width + neighborCol;
-                        if (bgVertexMask[neighborVertIdx]) {
+                        Vector2 neighborUv = new Vector2(neighborCol / (float)(width), neighborRow / (float)(height)); // Range [0, 1]
+                        if (SampleTexture(uv, fgPixels, fgWidth, fgHeight).a < 0.01f) {
                             // Compute distance to it
                             float distance = (new Vector2(neighborCol, neighborRow) - coordinate).magnitude;
                             if (distance < minDistance) {

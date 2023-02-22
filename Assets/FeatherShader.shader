@@ -48,7 +48,7 @@ Shader "Unlit/FeatherShader"
                 // sample the texture
                 fixed4 col = tex2D(_MainTex, i.uv);
                 fixed4 featherCol = tex2D(_FeatherTex, i.uv);
-                col.a = featherCol.r;
+                col.a = featherCol.a;
                 return col;
             }
             ENDCG
