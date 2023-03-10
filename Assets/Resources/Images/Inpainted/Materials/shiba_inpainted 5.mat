@@ -7,28 +7,29 @@ Material:
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_Name: 7ef0bbf1-6b59-4653-aeb4-ce8a0bf20a3a_fgMaterial
+  m_Name: shiba_inpainted 5
   m_Shader: {fileID: 4800000, guid: e6d3fdc5488f3cf44a5f789cfbdbc51f, type: 3}
   m_ValidKeywords: []
   m_InvalidKeywords: []
   m_LightmapFlags: 4
   m_EnableInstancingVariants: 0
   m_DoubleSidedGI: 0
-  m_CustomRenderQueue: 3000
+  m_CustomRenderQueue: -1
   stringTagMap: {}
   disabledShaderPasses: []
   m_SavedProperties:
     serializedVersion: 3
     m_TexEnvs:
     - _FeatherTex:
-        m_Texture: {fileID: 2800000, guid: 4ce231f87bf05ca4bb6cde913ec87b16, type: 3}
+        m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - _MainTex:
-        m_Texture: {fileID: 2800000, guid: b2823df0e513de44c8300c11185f27a9, type: 3}
+        m_Texture: {fileID: 2800000, guid: e0a2b487095e43847899aa38abfb632a, type: 3}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     m_Ints: []
-    m_Floats: []
+    m_Floats:
+    - _Blend: 0
     m_Colors: []
   m_BuildTextureStacks: []

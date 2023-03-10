@@ -11,6 +11,7 @@ public class SceneCameraControls : EditorWindow {
     public int FPS = 60;
     public int Loops = 3;
     public bool SaveFrames = false;
+    public bool SaveSceneView = false;
     public float StartAngle = 0;
     public float EndAngle = 180;
     public bool Boomerang = true;
@@ -21,6 +22,9 @@ public class SceneCameraControls : EditorWindow {
     public float CircleLookRadius = 0.3f;
     public Camera camera = null;
     public GameObject pivot = null;
+    public SkinnedMeshRenderer skinnedMeshRenderer = null;
+    public SkinnedMeshRenderer skinnedMeshRenderer2 = null;
+    public MeshRenderer materialRenderer = null;
 
     float t = 0.0f;
     double animationTime = 0;
@@ -98,9 +102,14 @@ public class SceneCameraControls : EditorWindow {
     // You can compile these images into a video using ffmpeg:
     // ffmpeg -i screenshot_%d.jpg -y recording.mp4
     void SaveFrame() {
-        // get main camera and manually render scene into rt
-        camera.targetTexture = renderTexture;
-        camera.Render();
+        // get camera and manually render scene into rt
+        if (SaveSceneView) {
+            SceneView.lastActiveSceneView.camera.targetTexture = renderTexture;
+            SceneView.lastActiveSceneView.camera.Render();
+        } else {
+            camera.targetTexture = renderTexture;
+            camera.Render();
+        }
 
         // read pixels will read from the currently active render texture so make our offscreen 
         // render texture active and then read the pixels
@@ -108,8 +117,12 @@ public class SceneCameraControls : EditorWindow {
         screenShot.ReadPixels(captureRect, 0, 0);
 
         // reset active camera texture and render texture
-        camera.targetTexture = null;
-        RenderTexture.active = null;
+        if (SaveSceneView) {
+            SceneView.lastActiveSceneView.camera.targetTexture = null;
+        } else {
+            camera.targetTexture = null;
+            RenderTexture.active = null;
+        }
 
         // get our unique filename
         string filename = uniqueFilename();
@@ -139,102 +152,130 @@ public class SceneCameraControls : EditorWindow {
     }
 
     void OnGUI() {
-        //Draw things here. Same as custom inspectors, EditorGUILayout and GUILayout has most of the things you need
-        AnimationLength = EditorGUILayout.FloatField("Animation Length (s)", AnimationLength);
-        if (AnimationLength < 0) {
-            AnimationLength = 0.01f;
-        }
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Common Settings");
+            GUILayout.BeginVertical("GroupBox");
+                AnimationLength = EditorGUILayout.FloatField("Animation Length (s)", AnimationLength);
+                if (AnimationLength < 0) {
+                    AnimationLength = 0.01f;
+                }
+                FPS = EditorGUILayout.IntSlider("FPS", FPS, 1, 240);
+                Loops = EditorGUILayout.IntSlider("# of Loops", Loops, 1, 10);
+                SaveFrames = EditorGUILayout.Toggle("Save Frames", SaveFrames);
+                SaveSceneView = EditorGUILayout.Toggle("Save Frames from Scene View", SaveSceneView);
+                Boomerang = EditorGUILayout.Toggle("Boomerang", Boomerang);
+                ResetOnEnd = EditorGUILayout.Toggle("Reset On End", ResetOnEnd);
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
+        
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Camera");
+            GUILayout.BeginVertical("GroupBox");
+                camera = EditorGUILayout.ObjectField("Camera Object", camera, typeof(Camera), true) as Camera;
+                pivot = EditorGUILayout.ObjectField("Pivot", pivot, typeof(GameObject), true) as GameObject;
+                if(GUILayout.Button("Reset Camera")) {
+                    if (camera) {
+                        camera.transform.rotation = originalRotation;
+                        camera.transform.position = originalCameraPosition;
+                        pivot.transform.rotation = originalPivotRotation;
+                        pivot.transform.position = originalPivot;
+                    } else {
+                        fov = SceneView.lastActiveSceneView.camera.fieldOfView / 360.0f * 2 * Mathf.PI;
+                        SceneView.lastActiveSceneView.rotation = Quaternion.LookRotation(Vector3.left, Vector3.up);
+                        SceneView.lastActiveSceneView.size = SizeFromCameraDistance(ResetCameraDistance, fov);
+                        SceneView.lastActiveSceneView.pivot = Vector3.zero;
+                        SceneView.lastActiveSceneView.Repaint();
+                    }
 
-        FPS = EditorGUILayout.IntSlider("FPS", FPS, 1, 240);
-        Loops = EditorGUILayout.IntSlider("# of Loops", Loops, 1, 10);
-        SaveFrames = EditorGUILayout.Toggle("Save Frames", SaveFrames);
-        Boomerang = EditorGUILayout.Toggle("Boomerang", Boomerang);
-        ResetOnEnd = EditorGUILayout.Toggle("Reset On End", ResetOnEnd);
-        ZoomAmount = EditorGUILayout.Slider("Zoom Amount", ZoomAmount, 0, 1.0f);
-        CircleLookRadius = EditorGUILayout.Slider("CircleLookRadius", CircleLookRadius, 0, 2.0f);
-        StartAngle = EditorGUILayout.Slider("Start Angle", StartAngle, -360, 360);
-        EndAngle = EditorGUILayout.Slider("End Angle", EndAngle, -360, 360);
-        OrbitClockwise = EditorGUILayout.Toggle("Orbit Clockwise", OrbitClockwise);
-        camera = EditorGUILayout.ObjectField("Camera Object", camera, typeof(Camera), true) as Camera;
-        pivot = EditorGUILayout.ObjectField("Pivot", pivot, typeof(GameObject), true) as GameObject;
+                    if (skinnedMeshRenderer) {
+                        skinnedMeshRenderer.SetBlendShapeWeight(0, 0);
+                    }
+                    if (skinnedMeshRenderer2) {
+                        skinnedMeshRenderer2.SetBlendShapeWeight(0, 0);
+                    }
+                }
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
 
-        if(GUILayout.Button("Demo Animation")) {
-            AnimationLength = 4;
-            Boomerang = true;
-            EndAngle = 180;
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, OrbitAnimationUpdate, () => {
-                AnimationLength = 1;
-                Boomerang = false;
-                ResetOnEnd = false;
-                ZoomAmount = 2.0f;
-                this.StartCoroutine(Animate(AnimationLength, Boomerang, ZoomAnimationUpdate, () => {
-                    AnimationLength = 6;
-                    Boomerang = false;
-                    this.StartCoroutine(Animate(AnimationLength, Boomerang, LookAt2AnimationUpdate, () => {
-                        AnimationLength = 1;
-                        Boomerang = false;
-                        ResetOnEnd = false;
-                        ZoomAmount = -ZoomAmount;
-                        this.StartCoroutine(Animate(AnimationLength, Boomerang, ZoomAnimationUpdate));
-                    }));
-                    
-                }));
-            }));
-        }
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Blendshape Animation");
+            GUILayout.BeginVertical("GroupBox");
+                skinnedMeshRenderer = EditorGUILayout.ObjectField("Blendshape Object", skinnedMeshRenderer, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
+                skinnedMeshRenderer2 = EditorGUILayout.ObjectField("Blendshape Object 2", skinnedMeshRenderer2, typeof(SkinnedMeshRenderer), true) as SkinnedMeshRenderer;
+                if(GUILayout.Button("Animate Blend Shape")) {
+                    this.StartCoroutine(Animate(AnimationLength, Boomerang, BlendshapeAnimationUpdate, null, Loops));
+                }
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
 
-        if(GUILayout.Button("Orbit Animation")) {
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, OrbitAnimationUpdate, null, Loops));
-        }
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Material Animation");
+            GUILayout.BeginVertical("GroupBox");
+                materialRenderer = EditorGUILayout.ObjectField("Material Object", materialRenderer, typeof(MeshRenderer), true) as MeshRenderer;
+                // material = EditorGUILayout.ObjectField("Material Object", material, typeof(Material), true) as Material;
+                if(GUILayout.Button("Animate Material 'Blend' Property")) {
+                    this.StartCoroutine(Animate(AnimationLength, Boomerang, MaterialAnimationUpdate, null, Loops));
+                }
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
 
-        if(GUILayout.Button("CircleLook Animation")) {
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, CircleLookAnimationUpdate, null, Loops));
-        }
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Orbit Animation");
+            GUILayout.BeginVertical("GroupBox");
+                StartAngle = EditorGUILayout.Slider("Start Angle", StartAngle, -360, 360);
+                EndAngle = EditorGUILayout.Slider("End Angle", EndAngle, -360, 360);
+                OrbitClockwise = EditorGUILayout.Toggle("Orbit Clockwise", OrbitClockwise);
+                if(GUILayout.Button("Orbit Animation")) {
+                    this.StartCoroutine(Animate(AnimationLength, Boomerang, OrbitAnimationUpdate, null, Loops));
+                }
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
 
-        if(GUILayout.Button("Zoom Animation")) {
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, ZoomAnimationUpdate, null, Loops));
-        }
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("CircleLook Animation");
+            GUILayout.BeginVertical("GroupBox");
+                CircleLookRadius = EditorGUILayout.Slider("CircleLookRadius", CircleLookRadius, 0, 2.0f);
+                if(GUILayout.Button("CircleLook Animation")) {
+                    this.StartCoroutine(Animate(AnimationLength, Boomerang, CircleLookAnimationUpdate, null, Loops));
+                }
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
 
-        if(GUILayout.Button("Look Animation")) {
-            lookRotation = Quaternion.LookRotation(Vector3.forward);
-            this.StartCoroutine(Animate(1, false, LookAtAnimationUpdate, () => {
-                lookRotation = Quaternion.LookRotation(Vector3.right + Vector3.forward);
-                this.StartCoroutine(Animate(1, false, LookAtAnimationUpdate, () => {
-                    lookRotation = Quaternion.LookRotation(Vector3.right + Vector3.up);
-                    this.StartCoroutine(Animate(1, false, LookAtAnimationUpdate, () => {
-                        lookRotation = Quaternion.LookRotation(Vector3.back);
-                        this.StartCoroutine(Animate(1, false, LookAtAnimationUpdate, () => {
-                            EndAngle = 180;
-                            this.StartCoroutine(Animate(2, false, OrbitAnimationUpdate));
-                        }));
-                    }));
-                }));
-            }));
-        }
-
-        if(GUILayout.Button("Look2 Animation")) {
-            this.StartCoroutine(Animate(AnimationLength, Boomerang, LookAt2AnimationUpdate));
-        }
-
-        if(GUILayout.Button("Reset Camera")) {
-            if (camera) {
-                camera.transform.rotation = originalRotation;
-                camera.transform.position = originalCameraPosition;
-                pivot.transform.rotation = originalPivotRotation;
-                pivot.transform.position = originalPivot;
-            } else {
-                fov = SceneView.lastActiveSceneView.camera.fieldOfView / 360.0f * 2 * Mathf.PI;
-                SceneView.lastActiveSceneView.rotation = Quaternion.LookRotation(Vector3.left, Vector3.up);
-                SceneView.lastActiveSceneView.size = SizeFromCameraDistance(ResetCameraDistance, fov);
-                SceneView.lastActiveSceneView.pivot = Vector3.zero;
-                SceneView.lastActiveSceneView.Repaint();
-            }
-        }
+        GUILayout.BeginVertical("HelpBox");
+            GUILayout.Label("Blendshape Animation");
+            GUILayout.BeginVertical("GroupBox");
+                ZoomAmount = EditorGUILayout.Slider("Zoom Amount", ZoomAmount, 0, 10.0f);
+                if(GUILayout.Button("Zoom Animation")) {
+                    this.StartCoroutine(Animate(AnimationLength, Boomerang, ZoomAnimationUpdate, null, Loops));
+                }
+            GUILayout.EndVertical();
+        GUILayout.EndVertical();
     }
 
     // SceneView's camera must be set using SceneView's pivot, rotation, size.
     // Setting camera transform directly does not work, and AlignViewToObject is an async method.
     // See: https://forum.unity.com/threads/moving-scene-view-camera-from-editor-script.64920/
     // And: https://docs.unity3d.com/ScriptReference/SceneView-size.html
+
+    void BlendshapeAnimationUpdate(float t) {
+        float modifiedT = EasingFunction.EaseInOutSine(0, 1, t);
+
+        if (skinnedMeshRenderer) {
+            skinnedMeshRenderer.SetBlendShapeWeight(0, modifiedT * 100.0f);
+        }
+
+        if (skinnedMeshRenderer2) {
+            skinnedMeshRenderer2.SetBlendShapeWeight(0, modifiedT * 100.0f);
+        }
+    }
+
+    void MaterialAnimationUpdate(float t) {
+        float modifiedT = EasingFunction.EaseInOutSine(0, 1, t);
+
+        if (materialRenderer) {
+            materialRenderer.sharedMaterial.SetFloat("_Blend", modifiedT);
+        }
+    }
 
     void OrbitAnimationUpdate(float t) {
         float angle = EasingFunction.EaseInOutSine(0, 1, t) * EndAngle;

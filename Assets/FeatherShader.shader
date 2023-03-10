@@ -4,6 +4,7 @@ Shader "Unlit/FeatherShader"
     {
         _MainTex ("Texture", 2D) = "white" {}
         _FeatherTex ("FeatherTexture", 2D) = "white" {}
+        _Blend ("Blend", Range(0.0, 1.0)) = 0.0
     }
     SubShader
     {
@@ -34,6 +35,7 @@ Shader "Unlit/FeatherShader"
             sampler2D _MainTex;
             float4 _MainTex_ST;
             sampler2D _FeatherTex;
+            float _Blend;
 
             v2f vert (appdata v)
             {
@@ -48,7 +50,7 @@ Shader "Unlit/FeatherShader"
                 // sample the texture
                 fixed4 col = tex2D(_MainTex, i.uv);
                 fixed4 featherCol = tex2D(_FeatherTex, i.uv);
-                col.a = featherCol.a;
+                col.a = (1 - _Blend) * col.a + _Blend * featherCol.a;
                 return col;
             }
             ENDCG
