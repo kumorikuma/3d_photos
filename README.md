@@ -9,6 +9,7 @@ Demonstration of how to make a simple 3D Photo for https://kumorikuma.dev/3d_pho
 Options are accessed through UnityEditor Windows in the toolbar:
 - **Custom -> Mesh Generation**
   - Main menu for creating 3D Photos. Most algorithm options here are for debugging and visualization purposes and can be left alone.
+  - MaxDistance parameter can be increased to increase the perceived depth in the scene.
 - **Custom -> Mesh Editing**
   - Currently only for adding blendshapes to other meshes
 - **Custom -> Scene Camera Controls**
