@@ -1,27 +1,18 @@
-using System;
-using System.IO;
 using System.Collections;
-using System.Collections.Generic;
 using Unity.EditorCoroutines.Editor;
 using UnityEngine;
 using UnityEditor;
 
-public class MeshEditing : EditorWindow {
-    MeshFilter SourceMesh;
-    MeshFilter TargetMesh;
-    int MeshWidth;
-    int MeshHeight;
-    int LargestSimplifiedRegionSize = 256;
-    float MaximumDeltaDistance = 0.025f;
-    bool ShouldSkipBorderVertices = false;
+// Authored by Francis Ge: https://github.com/kumorikuma
+// UnityEditor window with options for editing mesh.
+// Accessed from toolbar: Custom -> Mesh Editing
+public class MeshEditingWindow : EditorWindow {
+    MeshFilter SourceMesh; // Mesh to edit and perform changes onto
+    MeshFilter TargetMesh; // Mesh to use as data
 
     [MenuItem("Custom/Mesh Editing")]
     public static void OpenWindow() {
-       GetWindow<MeshEditing>();
-    }
- 
-    void OnEnable() {
-
+       GetWindow<MeshEditingWindow>();
     }
 
     void OnGUI() {
@@ -37,6 +28,9 @@ public class MeshEditing : EditorWindow {
         GUILayout.EndVertical();
     }
 
+    // Adds the selected mesh as a blendshape to the source mesh.
+    // Only works if they have the same number of vertices.
+    // Note: MeshRenderer using the Mesh needs to be changed to SkinnedMeshRenderer after.
     IEnumerator AddMeshAsBlendshape(MeshFilter sourceMesh, MeshFilter targetMesh) {
         Vector3[] sourceVerts = sourceMesh.mesh.vertices;
         Vector3[] targetVerts = targetMesh.mesh.vertices;

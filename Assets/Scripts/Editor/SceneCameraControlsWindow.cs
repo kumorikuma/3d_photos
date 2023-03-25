@@ -1,36 +1,45 @@
 using System;
 using System.IO;
 using System.Collections;
-using System.Collections.Generic;
 using Unity.EditorCoroutines.Editor;
 using UnityEngine;
 using UnityEditor;
 
-public class SceneCameraControls : EditorWindow {
+// Authored by Francis Ge: https://github.com/kumorikuma
+// UnityEditor Window that provides controls to animate both SceneView and scene cameras in Edit Mode.
+// Kinda hacked together to generate videos for demonstrations on website.
+public class SceneCameraControlsWindow : EditorWindow {
+    // General animation options
     public float AnimationLength = 2;
     public int FPS = 60;
     public int Loops = 3;
+    public bool Boomerang = true;
+    public bool ResetOnEnd = true;
+    // Recording options
     public bool SaveFrames = false;
     public bool SaveSceneView = false;
+    // Specific animation options
     public float StartAngle = 0;
     public float EndAngle = 180;
-    public bool Boomerang = true;
     public bool OrbitClockwise = true;
-    public bool ResetOnEnd = true;
     public float ZoomAmount = 0.5f;
     public float ResetCameraDistance = 2.5f;
     public float CircleLookRadius = 0.3f;
-    public Camera camera = null;
+    // Scene references
+    public Camera camera = null; // If null, will use the SceneView camera instead
     public GameObject pivot = null;
     public SkinnedMeshRenderer skinnedMeshRenderer = null;
     public SkinnedMeshRenderer skinnedMeshRenderer2 = null;
     public MeshRenderer materialRenderer = null;
 
-    float t = 0.0f;
+    // Animation state
+    float t = 0.0f; // Value between [0, 1] that indicates progress of animation
     double animationTime = 0;
     int framesRendered = 0;
     double previousTime = 0;
     int playbackDirection = 1;
+
+    // Original state of scene
     Quaternion originalRotation;
     Quaternion originalPivotRotation;
     float originalSize;
@@ -47,7 +56,7 @@ public class SceneCameraControls : EditorWindow {
 
     [MenuItem("Custom/Scene Camera Controls")]
     public static void OpenWindow() {
-       GetWindow<SceneCameraControls>();
+       GetWindow<SceneCameraControlsWindow>();
     }
  
     void OnEnable() {

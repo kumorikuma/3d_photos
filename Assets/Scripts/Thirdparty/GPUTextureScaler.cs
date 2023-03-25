@@ -1,7 +1,7 @@
 using UnityEngine;
  
-/// A unility class with functions to scale Texture2D Data.
-/// See: https://forum.unity.com/threads/how-to-resize-scale-down-texture-without-losing-quality.976965/
+/// A utility class with functions to scale Texture2D Data.
+/// Code Snippet found here: https://forum.unity.com/threads/how-to-resize-scale-down-texture-without-losing-quality.976965/
 ///
 /// Scale is performed on the GPU using RTT, so it's blazing fast.
 /// Setting up and Getting back the texture data is the bottleneck.
