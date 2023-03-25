@@ -1,6 +1,6 @@
 # Generating 3D Photos in Unity
 
-Demonstration of how to make a naive 3D Photo for https://kumorikuma.dev/3d_photos/. 
+Demonstration of how to make a simple 3D Photo for https://kumorikuma.dev/3d_photos/. 
 
 > Note: Requires Git LFS to checkout completely.
 
