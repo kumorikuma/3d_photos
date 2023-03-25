@@ -17,5 +17,8 @@ Options are accessed through UnityEditor Windows in the toolbar:
 Usage:
 1. Obtain an image, a depth map of the image, and a separate foreground RGBA image with the background transparent. Determine the FOV that the photo was taken with. For details, checkout the article: https://kumorikuma.dev/3d_photos/
 2. Set the images and FOV as input parameters, then hit **Generate 3D Photo**.
+3. Take the background texture and run it through an image inpainting tool like OpenAI's Dall-E, which will fill in the transparent areas with hallucinated pixels.
+4. Update the material used by the background with the unpainted texture.
+5. Done! Can export the object out from Unity if desired and rendered in any 3D renderer.
 
-The bulk of the code is in **MeshGeneration.cs** and the **Generate3DPhoto** function, and **MeshSimplification.cs** which handles the custom mesh simplify algorithm. **MeshSimplificationIncremental.cs** is a non-recursive generator version of the mesh simplification algorithm that can be paused and resumed to allow for an animated visualization of the algorithm in action.
+The bulk of the code is in **MeshGenerator.cs** and the **Generate3DPhoto** function, and **MeshSimplification.cs** which handles the custom mesh simplification algorithm. **MeshSimplificationIncremental.cs** is a non-recursive generator version of the mesh simplification algorithm that can be paused and resumed to allow for an animated visualization of the algorithm in action.
